@@ -1309,6 +1309,11 @@ static struct e2fsck_problem problem_table[] = {
 	  N_("Orphan file @i %i is not in use, but contains data.  "),
 	  PROMPT_CLEAR, PR_PREEN_OK },
 
+	/* Failed to goto block group */
+	{ PR_1_SCAN_GOTO,
+	  N_("failed to goto block group"),
+          PROMPT_NONE, PR_FATAL, 0, 0, 0 },
+
 	/* Pass 1b errors */
 
 	/* Pass 1B: Rescan for duplicate/bad blocks */

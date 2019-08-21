@@ -734,6 +734,9 @@ struct problem_context {
 /* Orphan file inode is not in use, but contains data */
 #define PR_1_ORPHAN_FILE_NOT_CLEAR		0x010090
 
+/* Failed to goto block group */
+#define PR_1_SCAN_GOTO				0x0100A0
+
 /*
  * Pass 1b errors
  */
