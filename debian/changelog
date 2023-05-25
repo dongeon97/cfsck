@@ -1,3 +1,10 @@
+e2fsprogs (1.47.0-wc2) unstable; urgency=medium
+
+  * Whamcloud Lustre-patched release 1.47.0-wc2
+  * tune2fs: fall back to old get/set fs label on error
+
+ -- Dongyang Li <dongyangli@ddn.com>  Thu, 25 May 2023 11:50:43 +1100
+
 e2fsprogs (1.47.0-wc1) unstable; urgency=medium
 
   * Whamcloud Lustre-patched release 1.47.0-wc1
