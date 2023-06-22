@@ -1,3 +1,10 @@
+e2fsprogs (1.47.0-wc3) unstable; urgency=medium
+
+  * Whamcloud Lustre-patched release 1.47.0-wc3
+  * mke2fs: disable metadata_csum_seed/orphan_file
+
+ -- Dongyang Li <dongyangli@ddn.com>  Thu, 22 Jun 2023 13:49:45 +1100
+
 e2fsprogs (1.47.0-wc2) unstable; urgency=medium
 
   * Whamcloud Lustre-patched release 1.47.0-wc2
