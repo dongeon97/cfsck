@@ -1,3 +1,13 @@
+e2fsprogs (1.47.0-wc4) unstable; urgency=medium
+
+  * mke2fs: add "-E iops" to set IOPS storage group
+  * ext2fs: make sure we have at least EXT2_FIRST_INO + 1 inodes
+  * ext2fs: don't retry discard/zeroout repeatedly
+  * e2fsck: use rb-tree to track EA reference counts
+  * e2fsck: fix merging ea_inode_refs
+
+ -- Dongyang Li <dongyangli@ddn.com>  Thu, 22 Jun 2023 13:49:45 +1100
+
 e2fsprogs (1.47.0-wc3) unstable; urgency=medium
 
   * Whamcloud Lustre-patched release 1.47.0-wc3
