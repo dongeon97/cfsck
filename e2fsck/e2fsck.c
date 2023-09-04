@@ -243,6 +243,13 @@ void e2fsck_free_context(e2fsck_t ctx)
 	ext2fs_free_mem(&ctx);
 }
 
+static float timeval_subtract(struct timeval *tv1,
+				       struct timeval *tv2)
+{
+	return ((tv1->tv_sec - tv2->tv_sec) +
+		((float) (tv1->tv_usec - tv2->tv_usec)) / 1000000);
+}
+
 /*
  * This function runs through the e2fsck passes and calls them all,
  * returning restart, abort, or cancel as necessary...
@@ -257,6 +264,7 @@ int e2fsck_run(e2fsck_t ctx)
 {
 	int	i;
 	pass_t	e2fsck_pass;
+	struct timeval time_start, time_end;
 
 #ifdef HAVE_SETJMP_H
 	if (setjmp(ctx->abort_loc)) {
@@ -271,7 +279,11 @@ int e2fsck_run(e2fsck_t ctx)
 			break;
 		if (e2fsck_mmp_update(ctx->fs))
 			fatal_error(ctx, 0);
+		gettimeofday(&time_start, 0);
 		e2fsck_pass(ctx);
+		gettimeofday(&time_end, 0);
+		printf("time taken by %d: %5.2f\n", i,
+				timeval_subtract(&time_end, &time_start));
 		if (ctx->progress)
 			(void) (ctx->progress)(ctx, 0, 0, 0);
 	}
