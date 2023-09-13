@@ -78,6 +78,8 @@
 #pragma GCC diagnostic pop
 #endif
 
+#include "thpool.h"
+
 /*
  * Exit codes used by fsck-type programs
  */

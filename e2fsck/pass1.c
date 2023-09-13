@@ -62,6 +62,8 @@
 
 #include "problem.h"
 
+#include "thpool.h"
+
 #ifdef NO_INLINE_FUNCS
 #define _INLINE_
 #else
