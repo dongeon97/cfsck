@@ -1597,8 +1597,11 @@ static errcode_t e2fsck_pass1_prepare(e2fsck_t ctx)
 #ifdef	HAVE_PTHREAD
 	pthread_rwlock_init(&ctx->fs_fix_rwlock, NULL);
 	pthread_rwlock_init(&ctx->fs_block_map_rwlock, NULL);
-	if (ctx->pfs_num_threads > 1)
+	if (ctx->pfs_num_threads > 1){
 		ctx->fs_need_locking = 1;
+        ctx->thread_pool = thpool_init(ctx->pfs_num_threads + ctx->pfs_num_pipeline_threads);
+
+    }
 #endif
 
 	return 0;
@@ -3568,6 +3571,40 @@ static int e2fsck_pass1_threads_join(e2fsck_t global_ctx)
 	return ret;
 }
 
+static int e2fsck_pass1_threadpool_join(e2fsck_t global_ctx)
+{
+	errcode_t rc;
+	errcode_t ret = 0;
+	struct e2fsck_thread_info *infos = global_ctx->infos;
+	struct e2fsck_thread_info *pinfo;
+	int num_threads = global_ctx->pfs_num_threads;
+	int i;
+
+    thpool_wait(global_ctx->thread_pool);
+	/* merge invalid bitmaps will recalculate it */
+	global_ctx->invalid_bitmaps = 0;
+	for (i = 0; i < num_threads; i++) {
+		pinfo = &infos[i];
+
+		if (!pinfo->eti_started)
+			continue;
+
+		rc = e2fsck_pass1_thread_join(global_ctx, infos[i].eti_thread_ctx);
+		if (rc) {
+			com_err(global_ctx->program_name, rc,
+				_("while joining pass1 thread\n"));
+			if (ret == 0)
+				ret = rc;
+		}
+	}
+
+	free(infos);
+	global_ctx->infos = NULL;
+
+
+	return ret;
+}
+
 static void *e2fsck_pass1_thread(void *arg)
 {
 	struct e2fsck_thread_info	*info = arg;
@@ -3659,13 +3696,14 @@ static int e2fsck_pass1_threads_start(e2fsck_t global_ctx)
 	e2fsck_t			 thread_ctx;
 	dgrp_t				 average_group;
 	int num_threads = global_ctx->pfs_num_threads;
+
 #ifdef DEBUG_THREADS
 	struct e2fsck_thread_debug	 thread_debug =
 		{PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0};
 
 	thread_debug.etd_finished_threads = 0;
 #endif
-
+    
 	retval = pthread_attr_init(&attr);
 	if (retval) {
 		com_err(global_ctx->program_name, retval,
@@ -3728,18 +3766,78 @@ static int e2fsck_pass1_threads_start(e2fsck_t global_ctx)
 	return 0;
 }
 
+static int e2fsck_pass1_threadpool_start(e2fsck_t global_ctx)
+{
+	struct e2fsck_thread_info	*infos;
+	pthread_attr_t			 attr;
+	errcode_t			 retval;
+	errcode_t			 ret;
+	struct e2fsck_thread_info	*tmp_pinfo;
+	int				 i;
+	e2fsck_t			 thread_ctx;
+	dgrp_t				 average_group;
+	int num_threads = global_ctx->pfs_num_threads;
+    int num_pipeline_threads = global_ctx->pfs_num_pipeline_threads;
+    int num_threads_all = num_threads + num_pipeline_threads;
+
+#ifdef DEBUG_THREADS
+	struct e2fsck_thread_debug	 thread_debug =
+		{PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0};
+
+	thread_debug.etd_finished_threads = 0;
+#endif
+
+	infos = calloc(num_threads_all, sizeof(struct e2fsck_thread_info));
+	if (infos == NULL) {
+		retval = -ENOMEM;
+		com_err(global_ctx->program_name, retval,
+			_("while allocating memory for threads\n"));
+		return retval;
+	}
+	global_ctx->infos = infos;
+
+	average_group = ext2fs_get_avg_group(global_ctx->fs);
+	for (i = 0; i < num_threads; i++) {
+		tmp_pinfo = &infos[i];
+		tmp_pinfo->eti_thread_index = i;
+#ifdef DEBUG_THREADS
+		tmp_pinfo->eti_debug = &thread_debug;
+#endif
+		retval = e2fsck_pass1_thread_prepare(global_ctx, &thread_ctx,
+						     i, num_threads,
+						     average_group);
+		if (retval) {
+			com_err(global_ctx->program_name, retval,
+				_("while preparing pass1 thread\n"));
+			break;
+		}
+		tmp_pinfo->eti_thread_ctx = thread_ctx;
+
+        thpool_add_work(global_ctx->thread_pool,(void*)e2fsck_pass1_thread,(void*)tmp_pinfo);
+		tmp_pinfo->eti_started = 1;
+	}
+    
+	if (retval) {
+		e2fsck_pass1_threadpool_join(global_ctx);
+		return retval;
+	}
+	return 0;
+}
+
+
+
 static void e2fsck_pass1_multithread(e2fsck_t global_ctx)
 {
 	errcode_t retval;
 
-	retval = e2fsck_pass1_threads_start(global_ctx);
+	retval = e2fsck_pass1_threadpool_start(global_ctx);
 	if (retval) {
 		com_err(global_ctx->program_name, retval,
 			_("while starting pass1 threads\n"));
 		goto out_abort;
 	}
 
-	retval = e2fsck_pass1_threads_join(global_ctx);
+	retval = e2fsck_pass1_threadpool_join(global_ctx);
 	if (retval) {
 		com_err(global_ctx->program_name, retval,
 			_("while joining pass1 threads\n"));

@@ -85,6 +85,7 @@ static void usage(e2fsck_t ctx)
 		" -p                   Automatic repair (no questions)\n"
 #ifdef HAVE_PTHREAD
 		" -m                   multiple threads to speedup fsck\n"
+		" -w                   multiple pipeline threads to speedup fsck\n"
 #endif
 		" -n                   Make no changes to the filesystem\n"
 		" -y                   Assume \"yes\" to all questions\n"
@@ -928,6 +929,8 @@ static errcode_t PRS(int argc, char *argv[], e2fsck_t *ret_ctx)
 #ifdef HAVE_PTHREAD
 	char		*pm;
 	unsigned long	thread_num;
+    char        *ppm;
+    unsigned long   pipeline_thread_num;
 #endif
 	unsigned long long phys_mem_kb, blk;
 
@@ -970,7 +973,7 @@ static errcode_t PRS(int argc, char *argv[], e2fsck_t *ret_ctx)
 	ctx->inode_badness_threshold = BADNESS_THRESHOLD;
 
 #ifdef HAVE_PTHREAD
-	while ((c = getopt(argc, argv, "pam:nyrcC:B:dE:fvtFVM:b:I:j:P:l:L:N:SsDkz:")) != EOF)
+	while ((c = getopt(argc, argv, "pam:w:nyrcC:B:dE:fvtFVM:b:I:j:P:l:L:N:SsDkz:")) != EOF)
 #else
 	while ((c = getopt(argc, argv, "panyrcC:B:dE:fvtFVM:b:I:j:P:l:L:N:SsDkz:")) != EOF)
 #endif
@@ -1028,6 +1031,20 @@ static errcode_t PRS(int argc, char *argv[], e2fsck_t *ret_ctx)
 			}
 			ctx->options |= E2F_OPT_MULTITHREAD;
 			ctx->pfs_num_threads = thread_num;
+			break;
+		case 'w':
+			pipeline_thread_num = strtoul(optarg, &ppm, 0);
+			if (*ppm)
+				fatal_error(ctx,
+					_("Invalid multiple pipeline thread num.\n"));
+			if (pipeline_thread_num > E2FSCK_MAX_THREADS) {
+				fprintf(stderr,
+					_("threads %lu too large (max %u)\n"),
+					pipeline_thread_num, E2FSCK_MAX_THREADS);
+				fatal_error(ctx, 0);
+			}
+			ctx->options |= E2F_OPT_MULTITHREAD;
+			ctx->pfs_num_pipeline_threads = pipeline_thread_num;
 			break;
 #endif
 		case 'n':

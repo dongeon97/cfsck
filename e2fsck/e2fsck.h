@@ -538,6 +538,7 @@ struct e2fsck_struct {
 	/* if @global_ctx is null, this field is unused */
 	struct e2fsck_thread	 thread_info;
 	__u32			 pfs_num_threads;
+	__u32			 pfs_num_pipeline_threads;
 	__u32			 mmp_update_thread;
 	int			 fs_need_locking;
 	/* serialize fix operation for multiple threads */
@@ -545,6 +546,7 @@ struct e2fsck_struct {
 	/* protect block_found_map, block_dup_map */
 	pthread_rwlock_t	 fs_block_map_rwlock;
 	struct e2fsck_thread_info	*infos;
+    threadpool thread_pool;
 #endif
 };
 
