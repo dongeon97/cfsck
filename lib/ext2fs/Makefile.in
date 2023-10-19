@@ -80,6 +80,7 @@ OBJS= $(DEBUGFS_LIB_OBJS) $(RESIZE_LIB_OBJS) $(E2IMAGE_LIB_OBJS) \
 	csum.o \
 	dblist.o \
 	dblist_dir.o \
+    dclist.o \
 	dirblock.o \
 	dirhash.o \
 	dir_iterate.o \
@@ -161,6 +162,7 @@ SRCS= ext2_err.c \
 	$(srcdir)/csum.c \
 	$(srcdir)/dblist.c \
 	$(srcdir)/dblist_dir.c \
+	$(srcdir)/dclist.c \
 	$(srcdir)/digest_encode.c \
 	$(srcdir)/dirblock.c \
 	$(srcdir)/dirhash.c \
@@ -832,6 +834,13 @@ dblist.o: $(srcdir)/dblist.c $(top_builddir)/lib/config.h \
  $(top_builddir)/lib/ext2fs/ext2_err.h $(srcdir)/ext2_ext_attr.h \
  $(srcdir)/hashmap.h $(srcdir)/bitops.h
 dblist_dir.o: $(srcdir)/dblist_dir.c $(top_builddir)/lib/config.h \
+ $(top_builddir)/lib/dirpaths.h $(srcdir)/ext2_fs.h \
+ $(top_builddir)/lib/ext2fs/ext2_types.h $(srcdir)/ext2fsP.h \
+ $(srcdir)/ext2fs.h $(srcdir)/ext2_fs.h $(srcdir)/ext3_extents.h \
+ $(top_srcdir)/lib/et/com_err.h $(srcdir)/ext2_io.h \
+ $(top_builddir)/lib/ext2fs/ext2_err.h $(srcdir)/ext2_ext_attr.h \
+ $(srcdir)/hashmap.h $(srcdir)/bitops.h
+dclist.o: $(srcdir)/dclist.c $(top_builddir)/lib/config.h \
  $(top_builddir)/lib/dirpaths.h $(srcdir)/ext2_fs.h \
  $(top_builddir)/lib/ext2fs/ext2_types.h $(srcdir)/ext2fsP.h \
  $(srcdir)/ext2fs.h $(srcdir)/ext2_fs.h $(srcdir)/ext3_extents.h \

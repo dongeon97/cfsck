@@ -104,6 +104,9 @@ struct ext2_bitmap_ops {
 	 * May be NULL, in which case a generic function is used. */
 	errcode_t (*find_first_set)(ext2fs_generic_bitmap_64 bitmap,
 				    __u64 start, __u64 end, __u64 *out);
+	errcode_t (*find_dup)(ext2fs_generic_bitmap_64 src,
+				ext2fs_generic_bitmap_64 dest,
+				ext2fs_generic_bitmap_64 dup);
 };
 
 extern struct ext2_bitmap_ops ext2fs_blkmap64_bitarray;

@@ -52,6 +52,9 @@ void ext2fs_free(ext2_filsys fs)
 	if (fs->dblist)
 		ext2fs_free_dblist(fs->dblist);
 
+	if (fs->dclist)
+		ext2fs_free_dclist(fs->dclist);
+
 	if (fs->icache)
 		ext2fs_free_inode_cache(fs->icache);
 
@@ -104,5 +107,22 @@ void ext2fs_free_dblist(ext2_dblist dblist)
 		dblist->fs->dblist = 0;
 	dblist->magic = 0;
 	ext2fs_free_mem(&dblist);
+}
+
+/*
+ * Free a delay check list
+ */
+
+void ext2fs_free_dclist(ext2_dclist dclist)
+{
+	if (!dclist)
+		return;
+
+	if (dclist->list)
+		ext2fs_free_mem(&dclist->list);
+	dclist->list = 0;
+	if (dclist->fs && dclist->fs->dclist == dclist)
+		dclist->fs->dclist = 0;
+	ext2fs_free_mem(&dclist);
 }
 

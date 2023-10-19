@@ -171,6 +171,15 @@ typedef struct ext2_struct_dblist *ext2_dblist;
 
 #define DBLIST_ABORT	1
 
+struct ext2_dc_entry {
+    int dot_state;
+    ext2_ino_t dir_ino;
+    ext2_ino_t parent_ino;
+};
+
+typedef struct ext2_struct_dclist *ext2_dclist;
+
+
 /*
  * ext2_fileio definitions
  */
@@ -267,6 +276,7 @@ struct struct_ext2_filsys {
 				struct ext2_inode *inode);
 	ext2_badblocks_list		badblocks;
 	ext2_dblist			dblist;
+	ext2_dclist			dclist;
 	__u32				stride;	/* for mke2fs */
 	struct ext2_super_block *	orig_super;
 	struct ext2_image_hdr *		image_header;
@@ -882,6 +892,9 @@ errcode_t ext2fs_merge_bitmap(ext2fs_generic_bitmap src,
 			      ext2fs_generic_bitmap dest,
 			      ext2fs_generic_bitmap dup,
 			      ext2fs_generic_bitmap dup_allowed);
+errcode_t ext2fs_find_dup_bitmap(ext2fs_generic_bitmap src,
+			      ext2fs_generic_bitmap dest,
+			      ext2fs_generic_bitmap dup);
 extern errcode_t ext2fs_allocate_block_bitmap(ext2_filsys fs,
 					      const char *descr,
 					      ext2fs_block_bitmap *ret);
@@ -1182,6 +1195,8 @@ extern errcode_t ext2fs_set_dir_block2(ext2_dblist dblist, ext2_ino_t ino,
 				       blk64_t blk, e2_blkcnt_t blockcnt);
 extern errcode_t ext2fs_copy_dblist(ext2_dblist src,
 				    ext2_dblist *dest);
+extern errcode_t ext2fs_copy_dblist_range(ext2_dblist src,
+				    ext2_dblist *dest, unsigned long long start, unsigned long long  count);
 extern int ext2fs_dblist_count(ext2_dblist dblist);
 extern blk64_t ext2fs_dblist_count2(ext2_dblist dblist);
 extern errcode_t ext2fs_dblist_get_last(ext2_dblist dblist,
@@ -1203,6 +1218,33 @@ extern errcode_t
 					      char	*buf,
 					      void	*priv_data),
 				  void *priv_data);
+
+/* dclist.c */
+extern errcode_t ext2fs_init_dclist(ext2_filsys fs, ext2_dclist *ret_dclist);
+extern errcode_t ext2fs_merge_dclist(ext2_dclist src, ext2_dclist dest);
+extern errcode_t ext2fs_dclist_iterate(ext2_dclist dclist,
+	int (*func)(ext2_filsys fs, struct ext2_dc_entry *dc_info,
+		    void	*priv_data),
+	void *priv_data);
+extern errcode_t ext2fs_dclist_iterate2(ext2_dclist dclist,
+	int (*func)(ext2_filsys fs, struct ext2_dc_entry *dc_info,
+		    void	*priv_data),
+	unsigned long long start,
+	unsigned long long count,
+	void *priv_data);
+extern errcode_t ext2fs_add_delay_check(ext2_dclist dclist, int dot_state,
+        ext2_ino_t dir_ino, ext2_ino_t parent_ino);
+extern errcode_t ext2fs_set_delay_check(ext2_dclist dclist, int dot_state,
+        ext2_ino_t dir_ino, ext2_ino_t parent_ino);
+extern errcode_t ext2fs_copy_dclist(ext2_dclist src,
+				    ext2_dclist *dest);
+extern errcode_t ext2fs_copy_dclist_range(ext2_dclist src,
+				    ext2_dclist *dest, unsigned long long start, unsigned long long  count);
+extern unsigned long long ext2fs_dclist_count(ext2_dclist dclist);
+extern errcode_t ext2fs_dclist_get_last(ext2_dclist dclist,
+					struct ext2_dc_entry **entry);
+
+
 
 #if 0
 /* digest_encode.c */
@@ -1437,6 +1479,7 @@ extern errcode_t ext2fs_sync_device(int fd, int flushb);
 /* freefs.c */
 extern void ext2fs_free(ext2_filsys fs);
 extern void ext2fs_free_dblist(ext2_dblist dblist);
+extern void ext2fs_free_dclist(ext2_dclist dclist);
 extern void ext2fs_badblocks_list_free(ext2_badblocks_list bb);
 extern void ext2fs_u32_list_free(ext2_u32_list bb);
 
@@ -1504,6 +1547,9 @@ errcode_t ext2fs_merge_generic_bmap(ext2fs_generic_bitmap gen_src,
                                     ext2fs_generic_bitmap gen_dest,
 				    ext2fs_generic_bitmap gen_dup,
 				    ext2fs_generic_bitmap dup_allowed);
+errcode_t ext2fs_find_dup_generic_bmap(ext2fs_generic_bitmap gen_src,
+                                    ext2fs_generic_bitmap gen_dest,
+				    ext2fs_generic_bitmap gen_dup);
 errcode_t ext2fs_compare_generic_bmap(errcode_t neq,
 				      ext2fs_generic_bitmap bm1,
 				      ext2fs_generic_bitmap bm2);
@@ -1577,6 +1623,7 @@ extern errcode_t ext2fs_icount_decrement(ext2_icount_t icount, ext2_ino_t ino,
 extern errcode_t ext2fs_icount_store(ext2_icount_t icount, ext2_ino_t ino,
 				     __u16 count);
 extern errcode_t ext2fs_icount_merge(ext2_icount_t src, ext2_icount_t dest);
+extern errcode_t ext2fs_pipeline_icount_merge(ext2_icount_t src, ext2_icount_t dest);
 extern ext2_ino_t ext2fs_get_icount_size(ext2_icount_t icount);
 errcode_t ext2fs_icount_validate(ext2_icount_t icount, FILE *);
 

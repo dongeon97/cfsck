@@ -289,8 +289,18 @@ int e2fsck_run(e2fsck_t ctx)
 	}
 	ctx->flags &= ~E2F_FLAG_SETJMP_OK;
 
-	if (ctx->pfs_num_threads > 1 || ctx->options & E2F_OPT_MULTITHREAD) {
+    if(ctx->pfs_num_dynamic_threads > 1){
         thpool_destroy(ctx->thread_pool);
+        thpool_destroy(ctx->pipeline_thread_pool);
+        thpool_destroy(ctx->idle_thread_pool);
+
+    }else{
+        if (ctx->pfs_num_threads > 1 || ctx->options & E2F_OPT_MULTITHREAD) {
+            thpool_destroy(ctx->thread_pool);
+        }
+        if (ctx->pfs_num_pipeline_threads > 1 || ctx->options & E2F_OPT_MULTITHREAD) {
+            thpool_destroy(ctx->pipeline_thread_pool);
+        }
     }
 	if (ctx->flags & E2F_FLAG_RUN_RETURN)
 		return (ctx->flags & E2F_FLAG_RUN_RETURN);

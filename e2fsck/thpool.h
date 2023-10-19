@@ -11,9 +11,63 @@
 extern "C" {
 #endif
 
+/* ========================== STRUCTURES ============================ */
+
+
+/* Binary semaphore */
+typedef struct bsem {
+	pthread_mutex_t mutex;
+	pthread_cond_t   cond;
+	int v;
+} bsem;
+
+
+/* Job */
+typedef struct job{
+	struct job*  prev;                   /* pointer to previous job   */
+	void   (*function)(void* arg);       /* function pointer          */
+	void*  arg;                          /* function's argument       */
+
+	int type; // 0=regular, 1=transfer protocol, -1=giveup protocol
+	struct thpool_* new_tpool; //new thread pool if there
+} job;
+
+
+/* Job queue */
+typedef struct jobqueue{
+	pthread_mutex_t rwmutex;             /* used for queue r/w access */
+	job  *front;                         /* pointer to front of queue */
+	job  *rear;                          /* pointer to rear  of queue */
+	bsem *has_jobs;                      /* flag as binary semaphore  */
+	int   len;                           /* number of jobs in queue   */
+} jobqueue;
+
+
+/* Thread */
+typedef struct thread{
+	int       id;                        /* friendly id               */
+	pthread_t pthread;                   /* pointer to actual thread  */
+	struct thpool_* thpool_p;            /* access to thpool          */
+
+	int borrowed; // signifies if this thread is borrowed
+	struct thpool_* orig_tpool; // originating threadpool
+} thread;
+
+
+/* Threadpool */
+typedef struct thpool_{
+	thread**   threads;                  /* pointer to threads        */
+	volatile int num_threads_alive;      /* threads currently alive   */
+	volatile int num_threads_working;    /* threads currently working */
+	pthread_mutex_t  thcount_lock;       /* used for thread count etc */
+	pthread_cond_t  threads_all_idle;    /* signal to thpool_wait     */
+	jobqueue  jobqueue;                  /* job queue                 */
+
+	int num_threads_borrowed; // How many threads are borrowed
+} thpool_;
+
+
 /* =================================== API ======================================= */
-
-
 typedef struct thpool_* threadpool;
 
 
@@ -179,6 +233,9 @@ void thpool_destroy(threadpool);
  */
 int thpool_num_threads_working(threadpool);
 
+int borrow_threads(threadpool thpool1, threadpool thpool2, int n);
+int release_borrowed_threads(threadpool thpool_p, int n);
+int get_queue_length(threadpool thpool_p);
 
 #ifdef __cplusplus
 }

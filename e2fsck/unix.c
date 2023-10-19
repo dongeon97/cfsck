@@ -931,6 +931,8 @@ static errcode_t PRS(int argc, char *argv[], e2fsck_t *ret_ctx)
 	unsigned long	thread_num;
     char        *ppm;
     unsigned long   pipeline_thread_num;
+    char        *dpm;
+    long   dynamic_thread_num;
 #endif
 	unsigned long long phys_mem_kb, blk;
 
@@ -973,7 +975,7 @@ static errcode_t PRS(int argc, char *argv[], e2fsck_t *ret_ctx)
 	ctx->inode_badness_threshold = BADNESS_THRESHOLD;
 
 #ifdef HAVE_PTHREAD
-	while ((c = getopt(argc, argv, "pam:w:nyrcC:B:dE:fvtFVM:b:I:j:P:l:L:N:SsDkz:")) != EOF)
+	while ((c = getopt(argc, argv, "pam:w:T:nyrcC:B:dE:fvtFVM:b:I:j:P:l:L:N:SsDkz:")) != EOF)
 #else
 	while ((c = getopt(argc, argv, "panyrcC:B:dE:fvtFVM:b:I:j:P:l:L:N:SsDkz:")) != EOF)
 #endif
@@ -1031,6 +1033,7 @@ static errcode_t PRS(int argc, char *argv[], e2fsck_t *ret_ctx)
 			}
 			ctx->options |= E2F_OPT_MULTITHREAD;
 			ctx->pfs_num_threads = thread_num;
+			ctx->pfs_num_all_threads += thread_num;
 			break;
 		case 'w':
 			pipeline_thread_num = strtoul(optarg, &ppm, 0);
@@ -1045,6 +1048,21 @@ static errcode_t PRS(int argc, char *argv[], e2fsck_t *ret_ctx)
 			}
 			ctx->options |= E2F_OPT_MULTITHREAD;
 			ctx->pfs_num_pipeline_threads = pipeline_thread_num;
+			ctx->pfs_num_all_threads += pipeline_thread_num;
+			break;
+		case 'T':
+			dynamic_thread_num = strtol(optarg, &dpm, 0);
+			if (*dpm)
+				fatal_error(ctx,
+					_("Invalid multiple pipeline thread num.\n"));
+			if (dynamic_thread_num > E2FSCK_MAX_THREADS) {
+				fprintf(stderr,
+					_("threads %lu too large (max %u)\n"),
+					dynamic_thread_num, E2FSCK_MAX_THREADS);
+				fatal_error(ctx, 0);
+			}
+			ctx->options |= E2F_OPT_MULTITHREAD;
+			ctx->pfs_num_dynamic_threads = dynamic_thread_num;
 			break;
 #endif
 		case 'n':

@@ -63,6 +63,8 @@
 #include "problem.h"
 
 #include "thpool.h"
+#include "scheduler.h"
+#include <sys/sysinfo.h>
 
 #ifdef NO_INLINE_FUNCS
 #define _INLINE_
@@ -1516,6 +1518,233 @@ out:
 }
 #endif
 
+/* for dynamic thread scheduler */
+int adjust_core_count(int cores, int prev_cores, float total_util, float process_util){
+
+	// There are 4 cases:
+	// 1. High total CPU, High process Util
+	// 	-> keep core budget
+	// 2. High total CPU, Low process Util
+	// 	-> lower core budget
+	// 3. Low total CPU, low or high process Util
+	// 	-> increase core budget
+	
+	float expected_process_util = 100.0 * (float) prev_cores - 100.0;
+	int effective_cores_used = (int) (total_util / 100.0);
+	float percent_per_core = 100.0 / (float) cores;
+	int extra_cores;
+	int core_budget;
+
+	//printf("Total CPU Utilization: %f\n", total_util);
+	//printf("Process Utilization: %f\n", process_util);
+
+	if(total_util > 100.0 - percent_per_core){
+		
+		if(process_util < expected_process_util){
+			// CPU High and Process Low, so lower it
+			// to the effective cores used 
+			//core_budget = prev_cores / 2;//effective_cores_used + 1;
+			core_budget = effective_cores_used + 1;
+			//if(prev_cores % 2){
+			//	core_budget++;
+			//}
+			if(core_budget <= 0){
+				core_budget = 1;
+			}
+			printf("Lowering core budget from %d to %d\n", prev_cores, core_budget);
+		}else{
+			// CPU High and Process High, maintain core count;
+			core_budget = prev_cores;	
+		}
+
+	}else{
+		extra_cores = (100.0 - total_util)/percent_per_core;
+		if(extra_cores){
+			core_budget = prev_cores + 1; //extra_cores - 1;
+		}
+		if(core_budget > cores){
+			core_budget = cores;
+		}
+		printf("Increasing core budget form %d to %d\n", prev_cores, core_budget);
+	}
+
+	return core_budget;
+}
+
+void policy(float utilization, float process, void* args)
+{
+
+	int inode_tasks, groups_per_task = 0, inode_work; // Inode vars
+	int db_tasks, db_per_task = 0, db_work;          // db vars
+	int ideal_data_threads, ideal_pipeline_threads;      // ideal vars
+	int tpool1_alive_count, tpool2_alive_count;
+	int tpool1_add_threads, tpool2_add_threads;
+	float float_ideal_data_threads, float_ideal_pipeline_threads;
+
+	e2fsck_t ctx;
+
+	// Some limits
+	int max_data = 4;
+	int max_pipeline = 99;
+
+	// cast main context;
+	ctx = (e2fsck_t) args;
+    ext2_ino_t inodes_per_group = ctx->fs->super->s_inodes_per_group; 
+
+	// Get inode work
+	inode_tasks = get_queue_length(ctx->thread_pool);
+	groups_per_task = ctx->thread_info.et_group_end - ctx->thread_info.et_group_start;
+	inode_work = inode_tasks * groups_per_task *(int)inodes_per_group;
+	//printf("Inode tasks: %d groups per: %d, inode_work : %d\n", inode_tasks, groups_per_task,inode_work);
+
+	// Get DB work
+	db_tasks = get_queue_length(ctx->pipeline_thread_pool);
+	db_per_task = 20000; // define variable
+	db_work = db_tasks * db_per_task;
+	//printf("db tasks: %d, db per task: %d\n", db_tasks, db_per_task);
+
+
+	// Calculate Ideal Thread Count
+	int weight = 100;
+	int core_budget; 
+	int total_work;
+
+	// Call adjustment core count if shceduler is core aware
+	if(ctx->core_aware){
+		//core_budget = ctx->pfs_num_dynamic_threads;
+		core_budget = adjust_core_count(ctx->pfs_num_dynamic_threads, 
+                                    ctx->core_budget, utilization, process);
+		ctx->core_budget = core_budget;
+	}else{
+		core_budget = ctx->pfs_num_dynamic_threads;
+	}
+
+
+	// Set weights
+	inode_work = inode_work;
+	//db_work = db_work * 9;
+
+	//Calculate total work
+	total_work = inode_work + db_work;
+
+	//printf("inode: %d db: %d total: %d\n", inode_work, db_work, total_work);
+
+	// Calculate ideal threads
+	if(total_work == 0){
+		ideal_data_threads = 0;
+		ideal_pipeline_threads = 0;
+	}else{
+		float_ideal_data_threads = (float) core_budget * inode_work  / total_work;
+		float_ideal_pipeline_threads = (float) core_budget * db_work / total_work;
+		ideal_data_threads = (int) float_ideal_data_threads;
+		ideal_pipeline_threads = (int) float_ideal_pipeline_threads;
+
+		// Round
+		if(float_ideal_data_threads - (float) ideal_data_threads > 0.5){
+			ideal_data_threads++;
+		}
+		if(float_ideal_pipeline_threads - (float) ideal_pipeline_threads >= 0.5){
+			ideal_pipeline_threads++;
+		}
+
+	}
+
+	// Capture how many threads currently assigned
+	// Should be saved in state, we don't want to capture wrong
+	// information is a thread was previously migrating
+	//
+	tpool1_alive_count = ctx->thread_pool_count;
+	tpool2_alive_count = ctx->pipeline_thread_pool_count;
+
+    int tpool1_borrowed_count = tpool1_alive_count - ctx->pfs_num_threads;
+    int tpool2_borrowed_count = tpool2_alive_count - ctx->pfs_num_pipeline_threads;
+
+	//printf("Tpool1: %d, Tpool2: %d\n", tpool1_alive_count, tpool2_alive_count);
+	//printf("Queues: %d, %d\n", inode_tasks, db_tasks);
+
+	//printf("Ideal: %d, %d\n", ideal_data_threads, ideal_pipeline_threads);
+
+
+	//tpool1_add_threads = ideal_data_threads - tpool1_alive_count;
+	//tpool2_add_threads = ideal_pipeline_threads - tpool2_alive_count;
+
+	tpool1_add_threads = ideal_data_threads - tpool1_borrowed_count;
+	tpool2_add_threads = ideal_pipeline_threads - tpool2_borrowed_count;
+	//printf("data add thread: %d, pipe add thread : %d, total budget: %d\n", tpool1_add_threads, tpool2_add_threads,core_budget);
+
+	// THIS IS TRICKY, during thread migration, work can be done as quickly
+	// during migration. What should be migrated to first?
+	// We expect threads to migrate from pass 1 to pass 2 in general
+	// Given thread contention in pass1
+	//
+	// Give priority to data threads
+	//
+	// Note: To ensure we don't go over core budget Borrow before adding
+
+	// Borrow data for pipeline threads
+/*	if(tpool2_add_threads > 0 && tpool1_add_threads < 0){
+		while(tpool2_add_threads != 0 && tpool1_add_threads != 0){
+			borrow_threads(ctx->thread_pool, ctx->pipeline_thread_pool, 1);
+			tpool2_add_threads--;
+			ctx->pipeline_thread_pool_count++;
+			tpool1_add_threads++;
+			ctx->thread_pool_count--;
+		}
+	}
+
+	// Borrow pipeline for data threads
+	if(tpool1_add_threads > 0 && tpool2_add_threads < 0){
+		while(tpool1_add_threads != 0 && tpool2_add_threads != 0){
+			borrow_threads(ctx->pipeline_thread_pool, ctx->thread_pool, 1);
+			tpool1_add_threads--;
+			ctx->thread_pool_count++;
+			tpool2_add_threads++;
+			ctx->pipeline_thread_pool_count--;
+		}
+	}
+*/
+	// Handle rest of pipeline threads
+	while(tpool2_add_threads != 0){
+		if(tpool2_add_threads > 0){
+			borrow_threads(ctx->idle_thread_pool, ctx->pipeline_thread_pool, 1);
+			tpool2_add_threads--;
+			ctx->pipeline_thread_pool_count++;
+		}else if(tpool2_add_threads < 0){
+			release_borrowed_threads(ctx->pipeline_thread_pool, 1);
+			tpool2_add_threads++;
+			ctx->pipeline_thread_pool_count--;
+		}else{
+			printf("SHOULD NOT GET HERE\n");
+		}
+	}
+
+	// Handle rest of data threads
+	while(tpool1_add_threads != 0){
+		if(tpool1_add_threads > 0){
+			borrow_threads(ctx->idle_thread_pool, ctx->thread_pool, 1);
+			tpool1_add_threads--;
+			ctx->thread_pool_count++;
+		}else if(tpool1_add_threads < 0){
+			release_borrowed_threads(ctx->thread_pool, 1);
+			tpool1_add_threads++;
+			ctx->thread_pool_count--;
+		}else{
+			printf("SHOULD NOT GET HERE\n");
+		}
+	}
+
+}
+
+// will change the trigger function. 
+// for example, if jobq length > threshold ? , it means the number of thread in pool is insufficient for data/pipe parallelism.
+
+/* Simple trigger that activates background scheduler thread
+ * every 50 microseconds
+ */
+void us_timer_trigger(void* args){
+	usleep(500000);
+}
+
 /*
  * We need call mark_table_blocks() before multiple
  * thread start, since all known system blocks should be
@@ -1597,10 +1826,41 @@ static errcode_t e2fsck_pass1_prepare(e2fsck_t ctx)
 #ifdef	HAVE_PTHREAD
 	pthread_rwlock_init(&ctx->fs_fix_rwlock, NULL);
 	pthread_rwlock_init(&ctx->fs_block_map_rwlock, NULL);
-	if (ctx->pfs_num_threads > 1){
-		ctx->fs_need_locking = 1;
-        ctx->thread_pool = thpool_init(ctx->pfs_num_threads + ctx->pfs_num_pipeline_threads);
+    if(ctx->pfs_num_dynamic_threads || ctx->pfs_num_dynamic_threads == -1 ){
+        ctx->fs_need_locking = 1;
 
+        initialize_scheduler(&ctx->sched);
+        set_policy(ctx->sched, policy);
+        set_trigger(ctx->sched, us_timer_trigger);
+        set_context(ctx->sched, ctx);
+        if(ctx->pfs_num_dynamic_threads == -1){
+           // ctx->sched_p.sched_priority = 0;
+           // sched_setscheduler(getpid(), SCHED_IDLE, &ctx->sched_p);
+            set_pid(ctx->sched, getpid());
+            ctx->pfs_num_dynamic_threads = get_nprocs();
+            ctx->core_aware = 1;
+        }else{
+            set_pid(ctx->sched,0); // Need to be changed when Resource-aware is implemented
+        }
+        ctx->thread_pool = thpool_init(ctx->pfs_num_threads);
+        ctx->thread_pool_count = ctx->pfs_num_threads;
+
+        ctx->pipeline_thread_pool = thpool_init(ctx->pfs_num_pipeline_threads);
+        ctx->pipeline_thread_pool_count = ctx->pfs_num_pipeline_threads;
+
+        ctx->idle_thread_pool = thpool_init(ctx->pfs_num_dynamic_threads);
+        ctx->idle_thread_pool_count = ctx->pfs_num_dynamic_threads;
+    }else{
+        if (ctx->pfs_num_threads > 1 ){ 
+            ctx->fs_need_locking = 1;
+            ctx->thread_pool = thpool_init(ctx->pfs_num_threads);
+            ctx->thread_pool_count = ctx->pfs_num_threads;
+        }
+        if (ctx->pfs_num_pipeline_threads > 0){
+            ctx->fs_need_locking = 1;
+            ctx->pipeline_thread_pool = thpool_init(ctx->pfs_num_pipeline_threads);
+            ctx->pipeline_thread_pool_count = ctx->pfs_num_pipeline_threads;
+        }
     }
 #endif
 
@@ -1745,6 +2005,11 @@ void e2fsck_pass1_run(e2fsck_t ctx)
 	e2fsck_t	global_ctx = ctx->global_ctx ? ctx->global_ctx : ctx;
 	int		inode_exp = 0;
 
+	ext2_ino_t	ino_scanned = 0;
+    unsigned long long pipeline_start = 0;
+    unsigned long long pipeline_count = 0;
+
+
 	init_resource_track(&rtrack, ctx->fs->io);
 	clear_problem_context(&pctx);
 
@@ -1837,7 +2102,14 @@ void e2fsck_pass1_run(e2fsck_t ctx)
 		ctx->flags |= E2F_FLAG_ABORT;
 		goto endit;
 	}
-
+/*
+	pctx.errcode = ext2fs_init_dclist(fs, 0);
+	if (pctx.errcode) {
+		fix_problem(ctx, PR_1_ALLOCATE_DBCOUNT, &pctx);
+		ctx->flags |= E2F_FLAG_ABORT;
+		goto endit;
+	}
+*/
 	/*
 	 * If the last orphan field is set, clear it, since the pass1
 	 * processing will automatically find and clear the orphans.
@@ -2005,6 +2277,7 @@ void e2fsck_pass1_run(e2fsck_t ctx)
 		if (ctx->global_ctx)
 		        ctx->thread_info.et_inode_number++;
 #endif
+        ino_scanned++;
 		pctx.ino = ino;
 		pctx.inode = inode;
 		ctx->stashed_ino = ino;
@@ -2679,7 +2952,37 @@ void e2fsck_pass1_run(e2fsck_t ctx)
 		}
 	next_unlock:
 		e2fsck_pass1_check_unlock(ctx);
+
+#ifdef HAVE_PTHREAD
+		/*
+		 * Right after checking each inode, check directory info 
+         * of the directory blocks in directory block list(dblist)
+         * not waiting until Pass 1 ends.
+		 */
+
+        if (ctx->pfs_num_pipeline_threads || ctx->options & E2F_OPT_MULTITHREAD){
+		    if(!(ino_scanned % 20000)){
+                pipeline_count = ext2fs_dblist_count2(ctx->fs->dblist); 
+                if(pipeline_count > pipeline_start){
+                    e2fsck_pipeline_threads_start(ctx, ctx->fs->dblist,
+                            pipeline_start, pipeline_count-pipeline_start);
+                    pipeline_start = pipeline_count; 
+                }
+            }
+        }
+#endif
+
 	}
+
+    if (ctx->pfs_num_pipeline_threads || ctx->options & E2F_OPT_MULTITHREAD){
+        pipeline_count = ext2fs_dblist_count2(ctx->fs->dblist); 
+        if(pipeline_count > pipeline_start){
+            e2fsck_pipeline_threads_start(ctx, ctx->fs->dblist,
+                    pipeline_start, pipeline_count-pipeline_start);
+            pipeline_start = pipeline_count; 
+        }
+    }
+
 	process_inodes(ctx, block_buf, inodes_to_process,
 		       &process_inode_count);
 	ext2fs_close_inode_scan(scan);
@@ -2805,6 +3108,7 @@ static errcode_t e2fsck_pass1_copy_fs(ext2_filsys dest, e2fsck_t src_context,
 	dest->inode_map = NULL;
 	dest->block_map = NULL;
 	dest->badblocks = NULL;
+
 	if (dest->dblist)
 		dest->dblist->fs = dest;
 	if (src->block_map) {
@@ -2922,7 +3226,20 @@ static int e2fsck_pass1_merge_fs(ext2_filsys dest, ext2_filsys src)
 			src->dblist = NULL;
 		}
 	}
-
+/*
+	if (src->dclist) {
+		if (dest->dclist) {
+			retval = ext2fs_merge_dclist(src->dclist,
+						     dest->dclist);
+			if (retval)
+				goto out;
+		} else {
+			dest->dclist = src->dclist;
+			dest->dclist->fs = dest;
+			src->dclist = NULL;
+		}
+	}
+*/
 	if (src->badblocks) {
 		if (dest->badblocks == NULL)
 			retval = ext2fs_badblocks_copy(src->badblocks,
@@ -3033,6 +3350,7 @@ static errcode_t e2fsck_pass1_thread_prepare(e2fsck_t global_ctx, e2fsck_t *thre
 	thread_context->casefolded_dirs = NULL;
 	thread_context->expand_eisize_map = NULL;
 	thread_context->inode_badness = NULL;
+    thread_context->inode_count = NULL;
 
 	retval = e2fsck_allocate_block_bitmap(global_ctx->fs,
 				_("in-use block map"), EXT2FS_BMAP64_RBTREE,
@@ -3571,16 +3889,31 @@ static int e2fsck_pass1_threads_join(e2fsck_t global_ctx)
 	return ret;
 }
 
+static float timeval_subtract(struct timeval *tv1,
+				       struct timeval *tv2)
+{
+	return ((tv1->tv_sec - tv2->tv_sec) +
+		((float) (tv1->tv_usec - tv2->tv_usec)) / 1000000);
+}
+
 static int e2fsck_pass1_threadpool_join(e2fsck_t global_ctx)
 {
+    struct timeval start, end;
 	errcode_t rc;
 	errcode_t ret = 0;
 	struct e2fsck_thread_info *infos = global_ctx->infos;
 	struct e2fsck_thread_info *pinfo;
 	int num_threads = global_ctx->pfs_num_threads;
+	int num_pipeline_threads = global_ctx->pfs_num_pipeline_threads;
 	int i;
 
     thpool_wait(global_ctx->thread_pool);
+    if(num_pipeline_threads){
+        gettimeofday(&start,0);
+        thpool_wait(global_ctx->pipeline_thread_pool);
+        gettimeofday(&end,0);
+        printf("wait time for pipe thread  : %5.2f \n",timeval_subtract(&end,&start));
+    }
 	/* merge invalid bitmaps will recalculate it */
 	global_ctx->invalid_bitmaps = 0;
 	for (i = 0; i < num_threads; i++) {
@@ -3601,13 +3934,13 @@ static int e2fsck_pass1_threadpool_join(e2fsck_t global_ctx)
 	free(infos);
 	global_ctx->infos = NULL;
 
-
 	return ret;
 }
 
 static void *e2fsck_pass1_thread(void *arg)
 {
 	struct e2fsck_thread_info	*info = arg;
+    info->eti_thread_id = pthread_self();
 	e2fsck_t			 thread_ctx = info->eti_thread_ctx;
 #ifdef DEBUG_THREADS
 	struct e2fsck_thread_debug	*thread_debug = info->eti_debug;
@@ -3765,6 +4098,128 @@ static int e2fsck_pass1_threads_start(e2fsck_t global_ctx)
 	}
 	return 0;
 }
+static void *set_pthread(void *arg)
+{
+	struct e2fsck_pipeline_info	*pinfo = arg;
+    int num_pipeline_threads = pinfo->epi_pipeline_ctx->global_ctx->pfs_num_pipeline_threads;
+    int num_dynamic_threads = pinfo->epi_pipeline_ctx->global_ctx->pfs_num_dynamic_threads;
+
+    for(int i = 0 ; i < num_pipeline_threads + num_dynamic_threads; i++){
+        if(pinfo->epi_pipeline_ctx->global_ctx->pipe_infos[i].epi_thread_id == pthread_self()){
+            return NULL;
+        }
+    }
+
+    pinfo->epi_thread_id = pthread_self();
+    return NULL;
+}
+
+static int e2fsck_pipeline_threadpool_start(e2fsck_t global_ctx)
+{
+	struct e2fsck_pipeline_info	*pipe_infos;
+	errcode_t			 retval;
+	errcode_t			 ret;
+	struct e2fsck_pipeline_info	*tmp_pinfo;
+	int				 i;
+    struct e2fsck_pipeline_context * pipeline_ctx;
+    int num_pipeline_threads = global_ctx->pfs_num_pipeline_threads;
+    int num_dynamic_threads = global_ctx->pfs_num_dynamic_threads;
+	ext2_filsys		pipethread_fs;
+
+#ifdef DEBUG_THREADS
+	struct e2fsck_thread_debug	 thread_debug =
+		{PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0};
+
+	thread_debug.etd_finished_threads = 0;
+#endif
+
+	pipe_infos = calloc(num_pipeline_threads + num_dynamic_threads, sizeof(struct e2fsck_pipeline_info));
+	if (pipe_infos == NULL) {
+		retval = -ENOMEM;
+		com_err(global_ctx->program_name, retval,
+			_("while allocating memory for threads\n"));
+		return retval;
+	}
+	global_ctx->pipe_infos = pipe_infos;
+
+    ext2fs_init_dclist(global_ctx->fs, &global_ctx->fs->dclist);
+
+    retval = e2fsck_setup_icount(global_ctx, "inode_count",
+                EXT2_ICOUNT_OPT_INCREMENT,
+                NULL, &global_ctx->inode_count);
+    if (retval) {
+        com_err(global_ctx->program_name, retval,
+            _("while preparing pipeline thread\n"));
+		return retval;
+    }
+
+	for (i = 0; i < num_pipeline_threads + num_dynamic_threads; i++) {
+		tmp_pinfo = &pipe_infos[i];
+		tmp_pinfo->epi_thread_index = i;
+#ifdef DEBUG_THREADS
+		tmp_pinfo->epi_debug = &thread_debug;
+#endif
+        retval = ext2fs_get_mem(sizeof(struct e2fsck_pipeline_context),
+                &tmp_pinfo->epi_pipeline_ctx);
+		if (retval) {
+			com_err(global_ctx->program_name, retval,
+				_("while preparing pipeline thread\n"));
+			break;
+		}
+
+        retval = ext2fs_get_mem(sizeof(struct struct_ext2_filsys), &pipethread_fs);
+        if (retval) {
+            com_err(global_ctx->program_name, retval, "while allocating memory");
+            break;
+        }
+        io_channel_flush_cleanup(global_ctx->fs->io);
+        retval = e2fsck_pass1_copy_fs(pipethread_fs, global_ctx, global_ctx->fs);
+        if (retval) {
+            com_err(global_ctx->program_name, retval, "while copying pipe thread fs");
+            break;
+        }
+        pipethread_fs->priv_data = tmp_pinfo->epi_pipeline_ctx;
+        
+        tmp_pinfo->epi_pipeline_ctx->fs = pipethread_fs;
+
+        if(i < num_pipeline_threads){
+            tmp_pinfo->epi_started = 1;
+            tmp_pinfo->epi_thread_id = global_ctx->pipeline_thread_pool->threads[i]->pthread;
+        }else{
+            tmp_pinfo->epi_started = 0;
+            tmp_pinfo->epi_thread_id = global_ctx->idle_thread_pool->threads[i-num_pipeline_threads]->pthread;
+        }
+
+        tmp_pinfo->epi_pipeline_ctx->global_ctx = global_ctx;
+        tmp_pinfo->epi_pipeline_ctx->dx_dir_info_count = 0;
+        tmp_pinfo->epi_pipeline_ctx->dx_dir_info_size = 0;
+        tmp_pinfo->epi_pipeline_ctx->dx_dir_info = NULL;
+
+        retval = e2fsck_setup_icount(global_ctx, "inode_count",
+                    EXT2_ICOUNT_OPT_INCREMENT,
+                    NULL, &tmp_pinfo->epi_pipeline_ctx->inode_count);
+        if (retval) {
+			com_err(global_ctx->program_name, retval,
+				_("while preparing pipeline thread\n"));
+			break;
+	    }
+
+        tmp_pinfo->epi_pipeline_ctx->buf = (char *) e2fsck_allocate_memory(global_ctx, 
+                2*global_ctx->fs->blocksize, "directory scan buffer");
+
+        ext2fs_init_dclist(global_ctx->fs,&tmp_pinfo->epi_pipeline_ctx->dclist);
+        tmp_pinfo->epi_pipeline_ctx->fs_links_count = 0;
+        tmp_pinfo->epi_pipeline_ctx->fs_total_count = 0;
+
+        //thpool_add_work(global_ctx->pipeline_thread_pool,(void*)set_pthread,(void*)tmp_pinfo);
+	}
+    
+	if (retval) {
+		e2fsck_pipeline_threadpool_join(global_ctx);
+		return retval;
+	}
+	return 0;
+}
 
 static int e2fsck_pass1_threadpool_start(e2fsck_t global_ctx)
 {
@@ -3778,6 +4233,7 @@ static int e2fsck_pass1_threadpool_start(e2fsck_t global_ctx)
 	dgrp_t				 average_group;
 	int num_threads = global_ctx->pfs_num_threads;
     int num_pipeline_threads = global_ctx->pfs_num_pipeline_threads;
+	int num_idle_threads = global_ctx->pfs_num_dynamic_threads;
     int num_threads_all = num_threads + num_pipeline_threads;
 
 #ifdef DEBUG_THREADS
@@ -3787,7 +4243,7 @@ static int e2fsck_pass1_threadpool_start(e2fsck_t global_ctx)
 	thread_debug.etd_finished_threads = 0;
 #endif
 
-	infos = calloc(num_threads_all, sizeof(struct e2fsck_thread_info));
+	infos = calloc(num_threads, sizeof(struct e2fsck_thread_info));
 	if (infos == NULL) {
 		retval = -ENOMEM;
 		com_err(global_ctx->program_name, retval,
@@ -3812,18 +4268,23 @@ static int e2fsck_pass1_threadpool_start(e2fsck_t global_ctx)
 			break;
 		}
 		tmp_pinfo->eti_thread_ctx = thread_ctx;
+        tmp_pinfo->eti_thread_id = global_ctx->thread_pool->threads[i]->pthread;
 
         thpool_add_work(global_ctx->thread_pool,(void*)e2fsck_pass1_thread,(void*)tmp_pinfo);
 		tmp_pinfo->eti_started = 1;
 	}
+
     
 	if (retval) {
 		e2fsck_pass1_threadpool_join(global_ctx);
 		return retval;
 	}
+
+    if(global_ctx->pfs_num_dynamic_threads){
+        run_scheduler_thread(global_ctx->sched);
+    }
 	return 0;
 }
-
 
 
 static void e2fsck_pass1_multithread(e2fsck_t global_ctx)
@@ -3859,10 +4320,16 @@ void e2fsck_pass1(e2fsck_t ctx)
 	if (retval)
 		return;
 #ifdef HAVE_PTHREAD
-	if (ctx->pfs_num_threads > 1 || ctx->options & E2F_OPT_MULTITHREAD) {
+    if(ctx->pfs_num_pipeline_threads){
+        e2fsck_pipeline_threadpool_start(ctx);
+    }
+	if (ctx->pfs_num_threads > 1 && ctx->options & E2F_OPT_MULTITHREAD) {
 		need_single = 0;
 		e2fsck_pass1_multithread(ctx);
-	}
+	}else if( ctx->pfs_num_pipeline_threads && ctx->options & E2F_OPT_MULTITHREAD){
+        need_single = 0;
+        e2fsck_pass1_run(ctx);
+    }
 	/* No lock is needed at this time */
 	ctx->fs_need_locking = 0;
 #endif

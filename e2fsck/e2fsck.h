@@ -79,6 +79,7 @@
 #endif
 
 #include "thpool.h"
+#include "scheduler.h"
 
 /*
  * Exit codes used by fsck-type programs
@@ -310,6 +311,32 @@ struct e2fsck_thread {
 	int		et_log_length;
 	char		et_log_buf[2048];
 };
+
+/*
+ * Fields that used for multi-thread
+ */
+
+struct e2fsck_pipeline_context {
+    e2fsck_t global_ctx;
+    ext2_filsys fs;
+
+    int scheduled;
+
+	struct dir_info_db	*dir_info;
+	ext2_dclist			dclist;
+
+    char *buf;
+	/*
+	 * Indexed directory information
+	 */
+	ext2_ino_t		dx_dir_info_count;
+	ext2_ino_t		dx_dir_info_size;
+	struct dx_dir_info	*dx_dir_info;
+
+    ext2_icount_t inode_count;
+    int fs_links_count;
+    int fs_total_count;
+};
 #endif
 
 struct e2fsck_struct {
@@ -423,6 +450,7 @@ struct e2fsck_struct {
 	ext2_ino_t		dx_dir_info_count;
 	ext2_ino_t		dx_dir_info_size;
 	struct dx_dir_info	*dx_dir_info;
+    pthread_rwlock_t dx_dir_rwlock;
 
 	/*
 	 * Directories to hash
@@ -537,16 +565,41 @@ struct e2fsck_struct {
 #ifdef HAVE_PTHREAD
 	/* if @global_ctx is null, this field is unused */
 	struct e2fsck_thread	 thread_info;
+	__u32			 pfs_num_all_threads;
 	__u32			 pfs_num_threads;
 	__u32			 pfs_num_pipeline_threads;
+	__u32			 pfs_num_dynamic_threads;
 	__u32			 mmp_update_thread;
 	int			 fs_need_locking;
 	/* serialize fix operation for multiple threads */
 	pthread_rwlock_t	 fs_fix_rwlock;
 	/* protect block_found_map, block_dup_map */
 	pthread_rwlock_t	 fs_block_map_rwlock;
+
+    /* for data parallelism */
 	struct e2fsck_thread_info	*infos;
     threadpool thread_pool;
+    int thread_pool_count;
+
+    /* for pipeline parallelism */
+	struct e2fsck_pipeline_info	*pipe_infos;
+    threadpool pipeline_thread_pool;
+    int pipeline_thread_pool_count;
+	ext2_ino_t		pipeline_dx_dir_info_count;
+	ext2_ino_t		pipeline_dx_dir_info_size;
+	struct dx_dir_info	*pipeline_dx_dir_info;
+
+    /* for dynamic thread scheduler */
+    threadpool idle_thread_pool;
+    int idle_thread_pool_count;
+
+    int scheduler;
+    struct scheduler* sched;
+    struct sched_param sched_p;
+
+    int core_aware;
+    int core_budget;
+
 #endif
 };
 
@@ -574,6 +627,20 @@ struct e2fsck_thread_info {
 	e2fsck_t		 eti_thread_ctx;
 #ifdef DEBUG_THREADS
 	struct e2fsck_thread_debug	*eti_debug;
+#endif
+};
+
+struct e2fsck_pipeline_info {
+	/* ID returned by pthread_create() */
+	pthread_t		 epi_thread_id;
+	/* Application-defined thread index */
+	int			 epi_thread_index;
+	/* Thread has been started */
+	int			 epi_started;
+	/* Context used for this thread */
+	struct e2fsck_pipeline_context *epi_pipeline_ctx;
+#ifdef DEBUG_THREADS
+	struct e2fsck_thread_debug	*epi_debug;
 #endif
 };
 
@@ -643,11 +710,14 @@ extern int e2fsck_dir_info_get_parent(e2fsck_t ctx, ext2_ino_t ino,
 extern int e2fsck_dir_info_get_dotdot(e2fsck_t ctx, ext2_ino_t ino,
 				      ext2_ino_t *dotdot);
 extern void e2fsck_merge_dx_dir(e2fsck_t global_ctx, e2fsck_t thread_ctx);
+extern void e2fsck_merge_from_pipeline_dx_dir(e2fsck_t global_ctx, struct e2fsck_pipeline_context* pipeline_ctx );
+extern void e2fsck_merge_to_pipeline_dx_dir(e2fsck_t global_ctx, struct e2fsck_pipeline_context* pipeline_ctx );
 
 /* dx_dirinfo.c */
 extern void e2fsck_add_dx_dir(e2fsck_t ctx, ext2_ino_t ino,
 			      struct ext2_inode *inode, int num_blocks);
 extern struct dx_dir_info *e2fsck_get_dx_dir_info(e2fsck_t ctx, ext2_ino_t ino);
+extern struct dx_dir_info *e2fsck_get_pipeline_dx_dir_info(struct e2fsck_pipeline_context* ctx, ext2_ino_t ino);
 extern void e2fsck_free_dx_dir_info(e2fsck_t ctx);
 extern ext2_ino_t e2fsck_get_num_dx_dirinfo(e2fsck_t ctx);
 extern struct dx_dir_info *e2fsck_dx_dir_info_iter(e2fsck_t ctx,
@@ -743,6 +813,8 @@ extern void e2fsck_intercept_block_allocations(e2fsck_t ctx);
 /* pass2.c */
 extern int e2fsck_process_bad_inode(e2fsck_t ctx, ext2_ino_t dir,
 				    ext2_ino_t ino, char *buf);
+extern void e2fsck_pipeline_threads_start(e2fsck_t ctx, ext2_dblist dblist, unsigned long long start, unsigned long long end);
+extern int e2fsck_pipeline_threadpool_join(e2fsck_t global_ctx);
 
 /* pass3.c */
 extern int e2fsck_reconnect_file(e2fsck_t ctx, ext2_ino_t inode);

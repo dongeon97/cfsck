@@ -143,6 +143,126 @@ void e2fsck_merge_dx_dir(e2fsck_t global_ctx, e2fsck_t thread_ctx)
 	global_ctx->dx_dir_info_count = total_count;
 }
 
+void e2fsck_merge_from_pipeline_dx_dir(e2fsck_t global_ctx, struct e2fsck_pipeline_context* pipeline_ctx )
+{
+	struct dx_dir_info *src_array = pipeline_ctx->dx_dir_info;
+	struct dx_dir_info *dest_array = global_ctx->dx_dir_info;
+	size_t size_dx_info = sizeof(struct dx_dir_info);
+	ext2_ino_t size = global_ctx->dx_dir_info_size;
+	ext2_ino_t src_count = pipeline_ctx->dx_dir_info_count;
+	ext2_ino_t dest_count = global_ctx->dx_dir_info_count;
+	ext2_ino_t total_count = src_count + dest_count;
+	struct dx_dir_info *array;
+	struct dx_dir_info *array_ptr;
+	ext2_ino_t src_index = 0, dest_index = 0;
+
+	if (pipeline_ctx->dx_dir_info_count == 0)
+		return;
+
+	if (size < total_count)
+		size = total_count;
+
+	array = e2fsck_allocate_memory(global_ctx, size * size_dx_info,
+				       "directory map");
+	array_ptr = array;
+	/*
+	 * This can be improved by binary search and memcpy, but codes
+	 * would be more complex. And if the groups distributed to each
+	 * thread are strided, this implementation won't be too bad
+	 * comparing to the optimiztion.
+	 */
+	while (src_index < src_count || dest_index < dest_count) {
+		if (src_index >= src_count) {
+			memcpy(array_ptr, &dest_array[dest_index],
+			       (dest_count - dest_index) * size_dx_info);
+			break;
+		}
+		if (dest_index >= dest_count) {
+			memcpy(array_ptr, &src_array[src_index],
+			       (src_count - src_index) * size_dx_info);
+			break;
+		}
+		if (src_array[src_index].ino < dest_array[dest_index].ino) {
+			*array_ptr = src_array[src_index];
+			src_index++;
+		} else {
+			assert(src_array[src_index].ino >
+			       dest_array[dest_index].ino);
+			*array_ptr = dest_array[dest_index];
+			dest_index++;
+		}
+		array_ptr++;
+	}
+
+	if (global_ctx->dx_dir_info)
+		ext2fs_free_mem(&global_ctx->dx_dir_info);
+	if (pipeline_ctx->dx_dir_info)
+		ext2fs_free_mem(&pipeline_ctx->dx_dir_info);
+	global_ctx->dx_dir_info = array;
+	global_ctx->dx_dir_info_size = size;
+	global_ctx->dx_dir_info_count = total_count;
+}
+
+void e2fsck_merge_to_pipeline_dx_dir(e2fsck_t global_ctx, struct e2fsck_pipeline_context* pipeline_ctx )
+{
+	struct dx_dir_info *src_array = global_ctx->dx_dir_info;
+	struct dx_dir_info *dest_array = pipeline_ctx->dx_dir_info;
+	size_t size_dx_info = sizeof(struct dx_dir_info);
+	ext2_ino_t size = pipeline_ctx->dx_dir_info_size;
+	ext2_ino_t src_count = global_ctx->dx_dir_info_count;
+	ext2_ino_t dest_count = pipeline_ctx->dx_dir_info_count;
+	ext2_ino_t total_count = src_count + dest_count;
+	struct dx_dir_info *array;
+	struct dx_dir_info *array_ptr;
+	ext2_ino_t src_index = 0, dest_index = 0;
+
+	if (global_ctx->dx_dir_info_count == 0)
+		return;
+
+	if (size < total_count)
+		size = total_count;
+
+	array = e2fsck_allocate_memory(global_ctx, size * size_dx_info,
+				       "directory map");
+	array_ptr = array;
+	/*
+	 * This can be improved by binary search and memcpy, but codes
+	 * would be more complex. And if the groups distributed to each
+	 * thread are strided, this implementation won't be too bad
+	 * comparing to the optimiztion.
+	 */
+	while (src_index < src_count || dest_index < dest_count) {
+		if (src_index >= src_count) {
+			memcpy(array_ptr, &dest_array[dest_index],
+			       (dest_count - dest_index) * size_dx_info);
+			break;
+		}
+		if (dest_index >= dest_count) {
+			memcpy(array_ptr, &src_array[src_index],
+			       (src_count - src_index) * size_dx_info);
+			break;
+		}
+		if (src_array[src_index].ino < dest_array[dest_index].ino) {
+			*array_ptr = src_array[src_index];
+			src_index++;
+		} else {
+			assert(src_array[src_index].ino >
+			       dest_array[dest_index].ino);
+			*array_ptr = dest_array[dest_index];
+			dest_index++;
+		}
+		array_ptr++;
+	}
+
+	if (pipeline_ctx->dx_dir_info)
+		ext2fs_free_mem(&pipeline_ctx->dx_dir_info);
+	if (global_ctx->dx_dir_info)
+		ext2fs_free_mem(&global_ctx->dx_dir_info);
+
+	pipeline_ctx->dx_dir_info = array;
+	pipeline_ctx->dx_dir_info_size = size;
+	pipeline_ctx->dx_dir_info_count = total_count;
+}
 /*
  * get_dx_dir_info() --- given an inode number, try to find the directory
  * information entry for it.
@@ -174,6 +294,35 @@ struct dx_dir_info *e2fsck_get_dx_dir_info(e2fsck_t ctx, ext2_ino_t ino)
 	}
 	return 0;
 }
+
+struct dx_dir_info *e2fsck_get_pipeline_dx_dir_info(struct e2fsck_pipeline_context* ctx, ext2_ino_t ino)
+{
+	ext2_ino_t low, high, mid;
+
+	low = 0;
+	high = ctx->dx_dir_info_count-1;
+	if (!ctx->dx_dir_info)
+		return 0;
+	if (ino == ctx->dx_dir_info[low].ino)
+		return &ctx->dx_dir_info[low];
+	if  (ino == ctx->dx_dir_info[high].ino)
+		return &ctx->dx_dir_info[high];
+
+	while (low < high) {
+		/* sum may overflow, but result will fit into mid again */
+		mid = (unsigned long long)(low + high) / 2;
+		if (mid == low || mid == high)
+			break;
+		if (ino == ctx->dx_dir_info[mid].ino)
+			return &ctx->dx_dir_info[mid];
+		if (ino < ctx->dx_dir_info[mid].ino)
+			high = mid;
+		else
+			low = mid;
+	}
+	return 0;
+}
+
 
 /*
  * Free the dx_dir_info structure when it isn't needed any more.

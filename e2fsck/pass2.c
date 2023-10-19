@@ -52,6 +52,10 @@
 #include "e2fsck.h"
 #include "problem.h"
 #include "support/dict.h"
+#include "../lib/ext2fs/ext2fsP.h"
+#ifdef HAVE_PTHREAD
+#include <pthread.h>
+#endif
 
 #ifdef NO_INLINE_FUNCS
 #define _INLINE_
@@ -65,6 +69,9 @@
  * Keeps track of how many times an inode is referenced.
  */
 static void deallocate_inode(e2fsck_t ctx, ext2_ino_t ino, char* block_buf);
+static int check_dir_block3(ext2_filsys fs,
+                struct ext2_dc_entry *dc_info,
+                void* priv_data);
 static int check_dir_block2(ext2_filsys fs,
 			   struct ext2_db_entry2 *dir_blocks_info,
 			   void *priv_data);
@@ -87,6 +94,23 @@ struct check_dir_struct {
 	unsigned long long list_offset;
 	unsigned long long ra_entries;
 	unsigned long long next_ra_off;
+
+    ext2_dclist dclist;
+};
+
+struct check_dir_context{
+    e2fsck_t ctx;
+    ext2_filsys fs;
+    ext2_dblist dblist;
+    ext2_dblist check_dblist;
+    struct check_dir_struct cd;
+
+    int start;
+    int count;
+
+	ext2_ino_t		dx_dir_info_count;
+	ext2_ino_t		dx_dir_info_size;
+	struct dx_dir_info	*dx_dir_info;
 };
 
 static void update_parents(struct dx_dir_info *dx_dir, int type)
@@ -121,6 +145,280 @@ static void update_parents(struct dx_dir_info *dx_dir, int type)
 		}
 	}
 }
+int get_pipeline_id(e2fsck_t ctx){
+    
+    int num_pipeline_threads = ctx->pfs_num_pipeline_threads;
+    int num_dynamic_threads = ctx->pfs_num_dynamic_threads;
+
+    for( int i = 0 ; i < num_pipeline_threads + num_dynamic_threads; i++){
+        if(ctx->pipe_infos[i].epi_thread_id == pthread_self()){
+            return i;
+        }
+    }
+}
+
+struct e2fsck_pipeline_context * get_pipeline_ctx(e2fsck_t ctx){
+    
+    int num_pipeline_threads = ctx->pfs_num_pipeline_threads;
+    int num_dynamic_threads = ctx->pfs_num_dynamic_threads;
+
+    for( int i = 0 ; i < num_pipeline_threads + num_dynamic_threads; i++){
+        if(ctx->pipe_infos[i].epi_thread_id == pthread_self()){
+            if(!ctx->pipe_infos[i].epi_started){
+                ctx->pipe_infos[i].epi_started = 1;
+                printf(" %d thread from idle pool starts pipelining \n",i-num_pipeline_threads);
+            }
+            return ctx->pipe_infos[i].epi_pipeline_ctx;
+        }
+    }
+
+    return NULL;
+}
+
+static void e2fsck_from_pipeline_merge_dx_dir(e2fsck_t global_ctx, struct e2fsck_pipeline_context* pipeline_ctx)
+{
+	if (pipeline_ctx->dx_dir_info == NULL)
+		return;
+
+	if (global_ctx->dx_dir_info == NULL) {
+		global_ctx->dx_dir_info = pipeline_ctx->dx_dir_info;
+		global_ctx->dx_dir_info_size = pipeline_ctx->dx_dir_info_size;
+		global_ctx->dx_dir_info_count = pipeline_ctx->dx_dir_info_count;
+		pipeline_ctx->dx_dir_info = NULL;
+		return;
+	}
+
+	e2fsck_merge_from_pipeline_dx_dir(global_ctx, pipeline_ctx);
+}
+
+static void e2fsck_to_pipeline_merge_dx_dir(e2fsck_t global_ctx, struct e2fsck_pipeline_context* pipeline_ctx)
+{
+	if (global_ctx->dx_dir_info == NULL)
+		return;
+
+	if (pipeline_ctx->dx_dir_info == NULL) {
+		pipeline_ctx->dx_dir_info = global_ctx->dx_dir_info;
+		pipeline_ctx->dx_dir_info_size = global_ctx->dx_dir_info_size;
+		pipeline_ctx->dx_dir_info_count = global_ctx->dx_dir_info_count;
+		global_ctx->dx_dir_info = NULL;
+		return;
+	}
+
+	e2fsck_merge_to_pipeline_dx_dir(global_ctx, pipeline_ctx);
+}
+
+static inline errcode_t
+e2fsck_pipeline_merge_icount(ext2_icount_t *dest_icount,
+			  ext2_icount_t *src_icount)
+{
+	if (*src_icount) {
+		if (*dest_icount == NULL) {
+			*dest_icount = *src_icount;
+			*src_icount = NULL;
+		} else {
+			errcode_t ret;
+
+			ret = ext2fs_pipeline_icount_merge(*src_icount,
+						  *dest_icount);
+			if (ret)
+				return ret;
+		}
+	}
+
+	return 0;
+}
+
+static float timeval_subtract(struct timeval *tv1,
+				       struct timeval *tv2)
+{
+	return ((tv1->tv_sec - tv2->tv_sec) +
+		((float) (tv1->tv_usec - tv2->tv_usec)) / 1000000);
+}
+
+static int e2fsck_pipeline_thread_join(e2fsck_t global_ctx, struct e2fsck_pipeline_context* pipeline_ctx, int started)
+{
+    struct timeval start, end;
+	errcode_t	retval;
+    __u32 links;
+
+    if(started){
+        global_ctx->fs_total_count += pipeline_ctx->fs_total_count;
+        global_ctx->fs_links_count += pipeline_ctx->fs_links_count;
+
+            //gettimeofday(&start,0);
+        //merge icount
+        links = e2fsck_pipeline_merge_icount(&global_ctx->inode_count,
+                        &pipeline_ctx->inode_count); 
+            //gettimeofday(&end,0);
+            //printf("mergeicount  time for pipe thread  : %5.2f \n",timeval_subtract(&end,&start));
+        global_ctx->fs_links_count += links;
+
+        //merge dx_dir
+        //e2fsck_from_pipeline_merge_dx_dir(global_ctx, pipeline_ctx);
+
+        //merge dclist
+        ext2fs_merge_dclist(pipeline_ctx->dclist, global_ctx->fs->dclist);
+    }
+    if(pipeline_ctx->fs->icache){
+		ext2fs_free_inode_cache(pipeline_ctx->fs->icache);
+		pipeline_ctx->fs->icache = NULL;
+    }
+    
+	ext2fs_free_icount(pipeline_ctx->inode_count);
+    ext2fs_free_mem(&pipeline_ctx->fs);
+	ext2fs_free_mem(&pipeline_ctx->buf);
+	ext2fs_free_mem(&pipeline_ctx);
+
+	return retval;
+}
+
+
+int e2fsck_pipeline_threadpool_join(e2fsck_t global_ctx)
+{
+    struct timeval start, end;
+	errcode_t rc;
+	errcode_t ret = 0;
+	struct e2fsck_pipeline_info *pipe_infos = global_ctx->pipe_infos;
+	struct e2fsck_pipeline_info *pinfo;
+	int num_pipeline_threads = global_ctx->pfs_num_pipeline_threads;
+	int num_dynamic_threads = global_ctx->pfs_num_dynamic_threads;
+	int i;
+	struct problem_context	pctx;
+
+    gettimeofday(&start,0);
+    thpool_wait(global_ctx->pipeline_thread_pool);
+    gettimeofday(&end,0);
+    printf("wait time 2 for pipe thread  : %5.2f \n",timeval_subtract(&end,&start));
+
+	for (i = 0; i < num_pipeline_threads + num_dynamic_threads ; i++) {
+		pinfo = &pipe_infos[i];
+
+		//if (!pinfo->epi_started)
+	//		continue;
+        //gettimeofday(&start,0);
+
+		rc = e2fsck_pipeline_thread_join(global_ctx, pipe_infos[i].epi_pipeline_ctx,pinfo->epi_started);
+        //gettimeofday(&end,0);
+        //printf("join time for pipe thread %d : %5.2f \n",i,timeval_subtract(&end,&start));
+
+		if (rc) {
+			com_err(global_ctx->program_name, rc,
+				_("while joining pass1 thread\n"));
+			if (ret == 0)
+				ret = rc;
+		}
+	}
+
+	free(pipe_infos);
+	global_ctx->pipe_infos = NULL;
+
+	return ret;
+}
+
+void pipeline_check_dir_block(void *args){
+   
+	int (*check_dir_func)(ext2_filsys fs,
+			      struct ext2_db_entry2 *dir_blocks_info,
+			      void *priv_data);
+
+    struct check_dir_context * cdx = (struct check_dir_context *) args;
+    int count = cdx->count;
+    struct e2fsck_pipeline_context* pipeline_ctx = get_pipeline_ctx(cdx->ctx);
+
+	e2fsck_pass1_check_lock(cdx->ctx);
+    cdx->check_dblist->fs = pipeline_ctx->fs;
+    cdx->cd.buf = pipeline_ctx->buf;
+    //e2fsck_to_pipeline_merge_dx_dir(cdx->ctx, pipeline_ctx);
+
+    //can be race condition if add_dx_dir called before merged.
+    //cdx->ctx->dx_dir_info = NULL;
+    //cdx->ctx->dx_dir_info_count = 0;
+    //cdx->ctx->dx_dir_info_size = 0;
+
+	if (ext2fs_has_feature_dir_index(cdx->fs->super))
+		ext2fs_dblist_sort2(cdx->check_dblist, special_dir_block_cmp);
+
+	check_dir_func = cdx->cd.ra_entries ? check_dir_block2 : check_dir_block;
+    
+	cdx->cd.pctx.errcode = ext2fs_dblist_iterate2(cdx->check_dblist, check_dir_func,
+						 &cdx->cd);
+	if (cdx->ctx->flags & E2F_FLAG_RESTART_LATER) {
+		cdx->ctx->flags |= E2F_FLAG_RESTART;
+		cdx->ctx->flags &= ~E2F_FLAG_RESTART_LATER;
+	}
+	if (cdx->cd.pctx.errcode) {
+		fix_problem(cdx->ctx, PR_2_DBLIST_ITERATE, &cdx->cd.pctx);
+		cdx->ctx->flags |= E2F_FLAG_ABORT;
+		goto cleanup;
+	}
+
+    // merge delay check list of pipeline thread to delay check list of thread fs.
+    // Each delay check list of thread fs will be merged when merging fs
+
+    ext2fs_merge_dclist(cdx->cd.dclist, pipeline_ctx->dclist);
+
+    printf("[Thread %d] Pipeline scan directory block range [%d, %d)\n",
+    //log_out(cdx->ctx, _("[Thread %d] Pipeline scan directory block range [%d, %d)\n"),
+       get_pipeline_id(cdx->ctx),cdx->start, cdx->start+cdx->count);
+cleanup:
+	e2fsck_pass1_check_unlock(cdx->ctx);
+    ext2fs_free_dclist(cdx->cd.dclist);
+	ext2fs_free_dblist(cdx->check_dblist);
+	cdx->fs->flags &= ~EXT2_FLAG_IGNORE_SWAP_DIRENT;
+    free(cdx);
+}
+
+    /*
+     * check_dir_block needs inode_*_map for test.
+     * These bitmaps are used by both Pass 1 thread and Pass 2 Pipeline thread.
+     * Pass 2 Pipeline thread use these only for test(read).
+     * If there are bugs with these, do not use "ctx" as parameter but copied bitmap.
+     */
+
+void e2fsck_pipeline_threads_start(e2fsck_t ctx, ext2_dblist dblist,
+        unsigned long long start, unsigned long long count)
+{
+
+    // No pipeline threads
+    if(!ctx->pfs_num_pipeline_threads) return;
+
+    // Already checked all directory block in dblist
+    //if(dblist->count == dblist->last_checked) return;
+
+	struct check_dir_context* cdx = (struct check_dir_context *)malloc(sizeof(struct check_dir_context));
+
+	ctx->fs->flags |= EXT2_FLAG_IGNORE_SWAP_DIRENT;
+
+	(void) e2fsck_dir_info_set_parent(ctx, EXT2_ROOT_INO, EXT2_ROOT_INO);
+
+    cdx->ctx = ctx;
+    cdx->fs = cdx->ctx->fs;
+    cdx->dblist = dblist;
+
+    cdx->start = start;
+    cdx->count = count; 
+    
+    ext2fs_copy_dblist_range(dblist,&cdx->check_dblist,cdx->start,cdx->count);
+
+    // copy dx_dir_info ,dir_info to pipeline ctx
+
+	clear_problem_context(&cdx->cd.pctx);
+
+	cdx->cd.ctx = ctx;
+	cdx->cd.count = 1;
+	cdx->cd.max = cdx->start + cdx->count;
+	cdx->cd.list_offset = 0;
+	cdx->cd.ra_entries = ctx->readahead_kb * 1024 / ctx->fs->blocksize;
+	cdx->cd.next_ra_off = 0;
+
+    ext2fs_init_dclist(0,&cdx->cd.dclist);
+    
+    cdx->dx_dir_info = ctx->dx_dir_info;
+    cdx->dx_dir_info_count = ctx->dx_dir_info_count;
+    cdx->dx_dir_info_size = ctx->dx_dir_info_size;
+
+	thpool_add_work(ctx->pipeline_thread_pool, (void*) pipeline_check_dir_block, (void*) cdx);
+}
 
 void e2fsck_pass2(e2fsck_t ctx)
 {
@@ -139,6 +437,7 @@ void e2fsck_pass2(e2fsck_t ctx)
 	short			depth;
 	problem_t		code;
 	int			bad_dir;
+    int         retval;
 	int (*check_dir_func)(ext2_filsys fs,
 			      struct ext2_db_entry2 *dir_blocks_info,
 			      void *priv_data);
@@ -154,41 +453,55 @@ void e2fsck_pass2(e2fsck_t ctx)
 	if (!(ctx->options & E2F_OPT_PREEN))
 		fix_problem(ctx, PR_2_PASS_HEADER, &cd.pctx);
 
-	cd.pctx.errcode = e2fsck_setup_icount(ctx, "inode_count",
-				EXT2_ICOUNT_OPT_INCREMENT,
-				ctx->inode_link_info, &ctx->inode_count);
-	if (cd.pctx.errcode) {
-		fix_problem(ctx, PR_2_ALLOCATE_ICOUNT, &cd.pctx);
-		ctx->flags |= E2F_FLAG_ABORT;
-		goto cleanup;
-	}
-	buf = (char *) e2fsck_allocate_memory(ctx, 2*fs->blocksize,
-					      "directory scan buffer");
+    if(!ctx->pfs_num_pipeline_threads){
+        cd.pctx.errcode = e2fsck_setup_icount(ctx, "inode_count",
+                    EXT2_ICOUNT_OPT_INCREMENT,
+                    ctx->inode_link_info, &ctx->inode_count);
+        if (cd.pctx.errcode) {
+            fix_problem(ctx, PR_2_ALLOCATE_ICOUNT, &cd.pctx);
+            ctx->flags |= E2F_FLAG_ABORT;
+            goto cleanup;
+        }
+    }
 
-	/*
-	 * Set up the parent pointer for the root directory, if
-	 * present.  (If the root directory is not present, we will
-	 * create it in pass 3.)
-	 */
-	(void) e2fsck_dir_info_set_parent(ctx, EXT2_ROOT_INO, EXT2_ROOT_INO);
+    buf = (char *) e2fsck_allocate_memory(ctx, 2*fs->blocksize,
+                          "directory scan buffer");
 
-	cd.buf = buf;
-	cd.ctx = ctx;
-	cd.count = 1;
-	cd.max = ext2fs_dblist_count2(fs->dblist);
-	cd.list_offset = 0;
-	cd.ra_entries = ctx->readahead_kb * 1024 / ctx->fs->blocksize;
-	cd.next_ra_off = 0;
+    /*
+     * Set up the parent pointer for the root directory, if
+     * present.  (If the root directory is not present, we will
+     * create it in pass 3.)
+     */
+    (void) e2fsck_dir_info_set_parent(ctx, EXT2_ROOT_INO, EXT2_ROOT_INO);
 
-	if (ctx->progress)
-		(void) (ctx->progress)(ctx, 2, 0, cd.max);
+    cd.buf = buf;
+    cd.ctx = ctx;
+    cd.count = 1;
+    cd.max = ext2fs_dblist_count2(fs->dblist);
+    cd.list_offset = 0;
+    cd.ra_entries = ctx->readahead_kb * 1024 / ctx->fs->blocksize;
+    cd.next_ra_off = 0;
 
-	if (ext2fs_has_feature_dir_index(fs->super))
-		ext2fs_dblist_sort2(fs->dblist, special_dir_block_cmp);
+    if (ctx->progress)
+        (void) (ctx->progress)(ctx, 2, 0, cd.max);
 
-	check_dir_func = cd.ra_entries ? check_dir_block2 : check_dir_block;
-	cd.pctx.errcode = ext2fs_dblist_iterate2(fs->dblist, check_dir_func,
-						 &cd);
+    if(!ctx->pfs_num_pipeline_threads){
+        if (ext2fs_has_feature_dir_index(fs->super))
+            ext2fs_dblist_sort2(fs->dblist, special_dir_block_cmp);
+
+        check_dir_func = cd.ra_entries ? check_dir_block2 : check_dir_block;
+        cd.pctx.errcode = ext2fs_dblist_iterate2(fs->dblist, check_dir_func,
+                             &cd);
+    } else{
+        retval = e2fsck_pipeline_threadpool_join(ctx);
+        if (retval) {
+            com_err(ctx->program_name, retval,
+                _("while joining pipeline threads\n"));
+            ctx->flags |= E2F_FLAG_ABORT;
+            goto cleanup;
+        }
+        cd.pctx.errcode = ext2fs_dclist_iterate(fs->dclist, check_dir_block3, &cd);
+    }
 	if (ctx->flags & E2F_FLAG_RESTART_LATER) {
 		ctx->flags |= E2F_FLAG_RESTART;
 		ctx->flags &= ~E2F_FLAG_RESTART_LATER;
@@ -1097,6 +1410,97 @@ static int check_encrypted_dirent(e2fsck_t ctx,
 	return 0;
 }
 
+static int check_dir_block3(ext2_filsys fs,
+                    struct ext2_dc_entry *dc,
+                    void* priv_data)
+{
+    int dot_state = dc->dot_state;
+    ext2_ino_t dir_ino = dc->dir_ino;
+    ext2_ino_t parent_ino = dc->parent_ino;
+	ext2_ino_t 		subdir_parent;
+	e2fsck_t		ctx;
+	struct check_dir_struct	*cd;
+	char			*buf, *ibuf;
+
+	cd = (struct check_dir_struct *) priv_data;
+	ibuf = buf = cd->buf;
+	ctx = cd->ctx;
+
+	if (!(ext2fs_test_inode_bitmap2(ctx->inode_used_map, dir_ino)))
+		return 0;
+
+	cd->pctx.ino = parent_ino;
+//	cd->pctx.blk = block_nr;
+//	cd->pctx.blkcount = db->blockcnt;
+	cd->pctx.ino2 = 0;
+	cd->pctx.dirent = 0;
+	cd->pctx.num = 0;
+    if ( ctx->inode_bb_map && (ext2fs_test_inode_bitmap2(ctx->inode_bb_map, dir_ino))) {
+        /*
+         * If the inode is in a bad block, offer to
+         * clear it.
+         */
+        if (fix_problem(ctx, PR_2_BB_INODE, &cd->pctx)) {
+            //dir_modified++;
+            return 0;
+        } else {
+            ext2fs_unmark_valid(fs);
+        }
+    }
+
+    if (!(ctx->flags & E2F_FLAG_RESTART_LATER) &&
+        ctx->inode_badness &&
+        ext2fs_icount_is_set(ctx->inode_badness, dir_ino)) {
+        if (e2fsck_process_bad_inode(ctx, parent_ino, dir_ino,
+                         buf + fs->blocksize)) {
+            //dir_modified++;
+            //goto next;
+            return 0;
+        }
+        if (ctx->flags & E2F_FLAG_SIGNAL_MASK)
+            return DIRENT_ABORT;
+    }
+
+
+    if (!(ctx->flags & E2F_FLAG_RESTART_LATER) &&
+        !(ext2fs_test_inode_bitmap2(ctx->inode_used_map, dir_ino))){
+        if (fix_problem_notbad(ctx, PR_2_UNUSED_INODE, &cd->pctx)) {
+            //dir_modified++;
+            return 0;
+        } else {
+            ext2fs_unmark_valid(fs);
+        }
+    }
+
+    //if (check_filetype(ctx, dirent, ino, &cd->pctx))
+        //dir_modified++;
+
+    if ((dot_state > 1) &&
+        (ext2fs_test_inode_bitmap2(ctx->inode_dir_map,
+                      dir_ino))) {
+        if (e2fsck_dir_info_get_parent(ctx, dir_ino,
+                           &subdir_parent)) {
+            cd->pctx.ino = dir_ino;
+            fix_problem(ctx, PR_2_NO_DIRINFO, &cd->pctx);
+            ctx->flags |= E2F_FLAG_ABORT;
+            return DIRENT_ABORT;
+        }
+        if (subdir_parent) {
+            cd->pctx.ino2 = subdir_parent;
+            if (fix_problem(ctx, PR_2_LINK_DIR,
+                    &cd->pctx)) {
+                //dir_modified++;
+                return 0;
+            }
+            cd->pctx.ino2 = 0;
+        } else {
+            (void) e2fsck_dir_info_set_parent(ctx,
+                      dir_ino, parent_ino);
+        }
+    }
+
+    return 0;
+}
 static int check_dir_block2(ext2_filsys fs,
 			   struct ext2_db_entry2 *db,
 			   void *priv_data)
@@ -1104,7 +1508,7 @@ static int check_dir_block2(ext2_filsys fs,
 	int err;
 	struct check_dir_struct *cd = priv_data;
 
-	if (cd->ra_entries && cd->list_offset >= cd->next_ra_off) {
+	if (!cd->ctx->pfs_num_pipeline_threads && cd->ra_entries && cd->list_offset >= cd->next_ra_off) {
 		err = e2fsck_readahead_dblist(fs,
 					E2FSCK_RA_DBLIST_IGNORE_BLOCKCNT,
 					fs->dblist,
@@ -1142,7 +1546,8 @@ static int check_dir_block(ext2_filsys fs,
 	problem_t		problem;
 	struct ext2_dx_root_info *root;
 	struct ext2_dx_countlimit *limit;
-	static dict_t de_dict;
+	//static dict_t de_dict;
+	dict_t de_dict;
 	struct problem_context	pctx;
 	int	dups_found = 0;
 	int	ret;
@@ -1158,11 +1563,27 @@ static int check_dir_block(ext2_filsys fs,
 	int	hash_flags = 0;
 	static char *eop_read_dirblock = NULL;
 	int cf_dir = 0;
+    struct e2fsck_pipeline_context * pipeline_ctx ;
+    int idx;
 
 	cd = (struct check_dir_struct *) priv_data;
 	ibuf = buf = cd->buf;
 	ctx = cd->ctx;
 
+    if(ctx->pfs_num_pipeline_threads){
+        for( int i = 0 ; i < ctx->pfs_num_pipeline_threads; i++){
+            if(ctx->pipe_infos[i].epi_thread_id == pthread_self()){
+                idx= i;
+                break;
+            }
+        }
+    }
+
+    if(ctx->pfs_num_pipeline_threads){
+        if((pipeline_ctx = get_pipeline_ctx(ctx)) == NULL){
+            printf("[Warning] No pipeline ctx existed\n");
+        }
+    }
 	/* We only want filename encoding verification on strict
 	 * mode or if explicitly requested by user. */
 	if (ext2fs_test_inode_bitmap2(ctx->inode_casefold_map, ino) &&
@@ -1188,7 +1609,7 @@ static int check_dir_block(ext2_filsys fs,
 	 * Make sure the inode is still in use (could have been
 	 * deleted in the duplicate/bad blocks pass.
 	 */
-	if (!(ext2fs_test_inode_bitmap2(ctx->inode_used_map, ino)))
+	if (!ctx->pfs_num_pipeline_threads && !(ext2fs_test_inode_bitmap2(ctx->inode_used_map, ino)))
 		return 0;
 
 	cd->pctx.ino = ino;
@@ -1281,8 +1702,10 @@ inline_read_fail:
 
 	}
 	ehandler_operation(0);
-	if (cd->pctx.errcode == EXT2_ET_DIR_CORRUPTED)
+	if (cd->pctx.errcode == EXT2_ET_DIR_CORRUPTED){
 		cd->pctx.errcode = 0; /* We'll handle this ourselves */
+
+    }
 	else if (cd->pctx.errcode == EXT2_ET_DIR_CSUM_INVALID) {
 		cd->pctx.errcode = 0; /* We'll handle this ourselves */
 		failed_csum = 1;
@@ -1298,7 +1721,13 @@ inline_read_fail:
 		memcpy(buf, buf2, fs->blocksize);
 		ext2fs_free_mem(&buf2);
 	}
-	dx_dir = e2fsck_get_dx_dir_info(ctx, ino);
+    if(!ctx->pfs_num_pipeline_threads){
+	    dx_dir = e2fsck_get_dx_dir_info(ctx, ino);
+    }else{
+        //pipeline_ctx = get_pipeline_ctx(ctx);
+        //dx_dir = e2fsck_get_pipeline_dx_dir_info(pipeline_ctx,ino);
+	    dx_dir = e2fsck_get_dx_dir_info(ctx, ino);
+    }
 	if (dx_dir && dx_dir->numblocks) {
 		if (db->blockcnt >= dx_dir->numblocks) {
 			pctx.dir = ino;
@@ -1421,6 +1850,7 @@ skip_checksum:
 				(void) ext2fs_get_rec_len(fs, dirent, &rec_len);
 			cd->pctx.dirent = dirent;
 			cd->pctx.num = offset;
+
 			if ((offset + rec_len > max_block_size) ||
 			    (rec_len < min_dir_len) ||
 			    ((rec_len % 4) != 0) ||
@@ -1537,7 +1967,7 @@ skip_checksum:
 		    (dirent->inode == fs->super->s_prj_quota_inum) ||
 		    (dirent->inode == fs->super->s_orphan_file_inum)) {
 			problem = PR_2_BAD_INO;
-		} else if (ctx->inode_bb_map &&
+		} else if (!ctx->pfs_num_pipeline_threads && ctx->inode_bb_map &&
 			   (ext2fs_test_inode_bitmap2(ctx->inode_bb_map,
 						     dirent->inode))) {
 			/*
@@ -1638,7 +2068,7 @@ skip_checksum:
 		 * (We wait until now so that we can display the
 		 * pathname to the user.)
 		 */
-		if (!(ctx->flags & E2F_FLAG_RESTART_LATER) &&
+		if (!ctx->pfs_num_pipeline_threads && !(ctx->flags & E2F_FLAG_RESTART_LATER) &&
 		    ctx->inode_badness &&
 		    ext2fs_icount_is_set(ctx->inode_badness, dirent->inode)) {
 			if (e2fsck_process_bad_inode(ctx, ino, dirent->inode,
@@ -1659,7 +2089,7 @@ skip_checksum:
 		 * incorrect bg_itable_unused; we'll get any real
 		 * problems after we restart.
 		 */
-		if (!(ctx->flags & E2F_FLAG_RESTART_LATER) &&
+		if (!ctx->pfs_num_pipeline_threads && !(ctx->flags & E2F_FLAG_RESTART_LATER) &&
 		    !(ext2fs_test_inode_bitmap2(ctx->inode_used_map,
 						dirent->inode)))
 			problem = PR_2_UNUSED_INODE;
@@ -1680,7 +2110,8 @@ skip_checksum:
 				goto next;
 		}
 
-		if (check_filetype(ctx, dirent, ino, &cd->pctx))
+		if (!ctx->pfs_num_pipeline_threads && check_filetype(ctx, dirent, ino, &cd->pctx))
+		//if (check_filetype(ctx, dirent, ino, &cd->pctx))
 			dir_modified++;
 
 		if (dir_encpolicy_id != NO_ENCRYPTION_POLICY) {
@@ -1731,29 +2162,36 @@ skip_checksum:
 		 * hard link.  We assume the first link is correct,
 		 * and ask the user if he/she wants to clear this one.
 		 */
-		if ((dot_state > 1) &&
-		    (ext2fs_test_inode_bitmap2(ctx->inode_dir_map,
-					      dirent->inode))) {
-			if (e2fsck_dir_info_get_parent(ctx, dirent->inode,
-						       &subdir_parent)) {
-				cd->pctx.ino = dirent->inode;
-				fix_problem(ctx, PR_2_NO_DIRINFO, &cd->pctx);
-				goto abort_free_dict;
-			}
-			if (subdir_parent) {
-				cd->pctx.ino2 = subdir_parent;
-				if (fix_problem(ctx, PR_2_LINK_DIR,
-						&cd->pctx)) {
-					dirent->inode = 0;
-					dir_modified++;
-					goto next;
-				}
-				cd->pctx.ino2 = 0;
-			} else {
-				(void) e2fsck_dir_info_set_parent(ctx,
-						  dirent->inode, ino);
-			}
-		}
+        if(!ctx->pfs_num_pipeline_threads){
+            if ((dot_state > 1) &&
+                (ext2fs_test_inode_bitmap2(ctx->inode_dir_map,
+                              dirent->inode))) {
+                if (e2fsck_dir_info_get_parent(ctx, dirent->inode,
+                                   &subdir_parent)) {
+                    cd->pctx.ino = dirent->inode;
+                    fix_problem(ctx, PR_2_NO_DIRINFO, &cd->pctx);
+                    goto abort_free_dict;
+                }
+                if (subdir_parent) {
+                    cd->pctx.ino2 = subdir_parent;
+                    if (fix_problem(ctx, PR_2_LINK_DIR,
+                            &cd->pctx)) {
+                        dirent->inode = 0;
+                        dir_modified++;
+                        goto next;
+                    }
+                    cd->pctx.ino2 = 0;
+                } else {
+                    (void) e2fsck_dir_info_set_parent(ctx,
+                              dirent->inode, ino);
+                }
+            }
+        }else{
+            if(dot_state > 1){
+                ext2fs_add_delay_check(cd->dclist,dot_state,
+                        dirent->inode,ino);
+            }
+        }
 
 		if (dups_found) {
 			;
@@ -1767,11 +2205,20 @@ skip_checksum:
 		} else
 			dict_alloc_insert(&de_dict, dirent, dirent);
 
-		ext2fs_icount_increment(ctx->inode_count, dirent->inode,
-					&links);
-		if (links > 1)
-			ctx->fs_links_count++;
-		ctx->fs_total_count++;
+        if(!ctx->pfs_num_pipeline_threads){
+            ext2fs_icount_increment(ctx->inode_count, dirent->inode,
+                        &links);
+            if (links > 1)
+                ctx->fs_links_count++;
+            ctx->fs_total_count++;
+        }else{
+            //pipeline_ctx = get_pipeline_ctx(ctx);
+            ext2fs_icount_increment(pipeline_ctx->inode_count, dirent->inode,
+                        &links);
+            if (links > 1)
+                pipeline_ctx->fs_links_count++;
+            pipeline_ctx->fs_total_count++;
+        }
 	next:
 		prev = dirent;
 		if (dir_modified)

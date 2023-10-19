@@ -657,9 +657,8 @@ errcode_t ext2fs_icount_decrement(ext2_icount_t icount, ext2_ino_t ino,
 		ext2fs_unmark_inode_bitmap2(icount->single, ino);
 		if (icount->multiple)
 			ext2fs_unmark_inode_bitmap2(icount->multiple, ino);
-		else {
-			set_inode_count(icount, ino, 0);
-		}
+		set_inode_count(icount, ino, 0);
+		
 		if (ret)
 			*ret = 0;
 		return 0;
@@ -730,6 +729,71 @@ errcode_t ext2fs_icount_merge_full_map(ext2_icount_t src, ext2_icount_t dest)
 	return EOPNOTSUPP;
 }
 
+errcode_t ext2fs_pipeline_icount_merge_el(ext2_icount_t src, ext2_icount_t dest)
+{
+	int			 src_count = src->count;
+	int			 dest_count = dest->count;
+	int			 size = src_count + dest_count;
+	int			 size_entry = sizeof(struct ext2_icount_el);
+	struct ext2_icount_el	*array;
+	struct ext2_icount_el	*array_ptr;
+	struct ext2_icount_el	*src_array = src->list;
+	struct ext2_icount_el	*dest_array = dest->list;
+	int			 src_index = 0;
+	int			 dest_index = 0;
+    int             dup = 0;
+	errcode_t		 retval;
+
+	if (src_count == 0)
+		return 0;
+
+	retval = ext2fs_get_array(size, size_entry, &array);
+	if (retval)
+		return retval;
+
+	array_ptr = array;
+	/*
+	 * This can be improved by binary search and memcpy, but codes
+	 * would be more complex. And if number of bad blocks is small,
+	 * the optimization won't improve performance a lot.
+	 */
+	while (src_index < src_count || dest_index < dest_count) {
+		if (src_index >= src_count) {
+			memcpy(array_ptr, &dest_array[dest_index],
+			       (dest_count - dest_index) * size_entry);
+			break;
+		}
+		if (dest_index >= dest_count) {
+			memcpy(array_ptr, &src_array[src_index],
+			       (src_count - src_index) * size_entry);
+			break;
+		}
+		if (src_array[src_index].ino < dest_array[dest_index].ino) {
+			*array_ptr = src_array[src_index];
+			src_index++;
+		} else if(src_array[src_index].ino == dest_array[dest_index].ino){
+            *array_ptr = src_array[src_index];
+            array_ptr->count += dest_array[dest_index].count;
+            src_index++;
+            dest_index++;
+            dup++;
+        } else {
+			assert(src_array[src_index].ino >
+			       dest_array[dest_index].ino);
+			*array_ptr = dest_array[dest_index];
+			dest_index++;
+		}
+		array_ptr++;
+	}
+
+	ext2fs_free_mem(&dest->list);
+	dest->list = array;
+	dest->count = src_count + dest_count - dup;
+	dest->size = size;
+	dest->last_lookup = NULL;
+	return dup;
+}
+
 errcode_t ext2fs_icount_merge_el(ext2_icount_t src, ext2_icount_t dest)
 {
 	int			 src_count = src->count;
@@ -771,7 +835,7 @@ errcode_t ext2fs_icount_merge_el(ext2_icount_t src, ext2_icount_t dest)
 		if (src_array[src_index].ino < dest_array[dest_index].ino) {
 			*array_ptr = src_array[src_index];
 			src_index++;
-		} else {
+		}else {
 			assert(src_array[src_index].ino >
 			       dest_array[dest_index].ino);
 			*array_ptr = dest_array[dest_index];
@@ -782,12 +846,158 @@ errcode_t ext2fs_icount_merge_el(ext2_icount_t src, ext2_icount_t dest)
 
 	ext2fs_free_mem(&dest->list);
 	dest->list = array;
-	dest->count = src_count + dest_count;
+	dest->count = src_count + dest_count ;
 	dest->size = size;
 	dest->last_lookup = NULL;
 	return 0;
 }
 
+static float timeval_subtract(struct timeval *tv1,
+				       struct timeval *tv2)
+{
+	return ((tv1->tv_sec - tv2->tv_sec) +
+		((float) (tv1->tv_usec - tv2->tv_usec)) / 1000000);
+}
+
+errcode_t ext2fs_pipeline_icount_merge(ext2_icount_t src, ext2_icount_t dest)
+{
+    ext2fs_inode_bitmap dup_ss;
+    ext2fs_inode_bitmap dup_sm;
+    ext2fs_inode_bitmap dup_ms;
+    struct timeval start, end;
+    struct timeval fstart, fend;
+    float t = 0.0;
+	errcode_t	retval;
+    ext2_ino_t ino;
+    ext2_ino_t count = 0;
+    __u16 links;
+    __u32 links_count = 0; //for add fs_links_count 
+
+	ext2fs_allocate_inode_bitmap(src->single->fs,NULL,&dup_ss);
+	ext2fs_allocate_inode_bitmap(src->single->fs,NULL,&dup_sm);
+	ext2fs_allocate_inode_bitmap(src->single->fs,NULL,&dup_ms);
+
+	if (src->fullmap && !dest->fullmap)
+		return EINVAL;
+
+	if (!src->fullmap && dest->fullmap)
+		return EINVAL;
+
+	if (src->multiple && !dest->multiple)
+		return EINVAL;
+
+	if (!src->multiple && dest->multiple)
+		return EINVAL;
+
+/*    gettimeofday(&start,0);
+
+    for( ino = 1 ; ino < src->num_inodes; ino++){
+        if(ext2fs_test_inode_bitmap2(src->single, ino) ||
+                ext2fs_test_inode_bitmap2(src->multiple, ino) )
+        {
+            ext2fs_icount_fetch(dest, ino, &links);
+
+            if(links){
+                links_count++;
+            }
+        }
+        if((ext2fs_test_inode_bitmap2(src->single, ino) ||
+            ext2fs_test_inode_bitmap2(src->multiple, ino)) &&
+            (ext2fs_test_inode_bitmap2(dest->single, ino) ||
+                        ext2fs_test_inode_bitmap2(dest->multiple, ino)))
+        {
+            gettimeofday(&fstart,0);
+            //ext2fs_icount_fetch(dest, ino, &links);
+
+            //if(links){
+                links_count++;
+           // }
+
+            ext2fs_icount_fetch(src, ino, &links);
+
+            while(links > 0){
+                ext2fs_icount_decrement(src,ino,NULL);
+                ext2fs_icount_increment(dest,ino,NULL);
+                links--; 
+            }
+            gettimeofday(&fend,0);
+            t +=timeval_subtract(&fend,&fstart);
+        }
+    }
+
+    __u16 src_links;
+    __u16 dest_links;
+    for( ino = 1 ; ino < src->num_inodes; ino++){
+        ext2fs_icount_fetch(dest, ino, &dest_links);
+        ext2fs_icount_fetch(src, ino, &src_links);
+        if(src_links && dest_links){
+            links_count++;
+            set_inode_count(dest,ino,src_links+dest_links);
+            set_inode_count(src,ino,0);
+
+            if(dest_links == 1){
+		        ext2fs_unmark_inode_bitmap2(dest->single, ino);
+		        ext2fs_mark_inode_bitmap2(dest->multiple, ino);
+            }
+            ext2fs_unmark_inode_bitmap2(src->single, ino);
+            ext2fs_unmark_inode_bitmap2(src->multiple, ino);
+        }
+        
+    }*/
+  //  gettimeofday(&end,0);
+   // printf("src count : %d, dest count :%d\n",src->count, dest->count);
+   // printf("mergeicount  duplicated time for pipe thread  : %5.2f \n",timeval_subtract(&end,&start));
+   // printf("fetch time for pipe thread  : %5.2f \n",t);
+
+
+
+	retval = ext2fs_find_dup_bitmap(src->single, dest->single, dup_ss);
+	retval = ext2fs_find_dup_bitmap(src->single, dest->multiple, dup_sm);
+	retval = ext2fs_find_dup_bitmap(src->multiple, dest->single, dup_ms);
+
+    for( ino = 1 ; ino < src->num_inodes; ino++){
+        if(ext2fs_test_inode_bitmap2(dup_ss, ino)){
+                ext2fs_icount_increment(dest,ino,NULL);
+                ext2fs_unmark_inode_bitmap2(src->single, ino);
+                links_count++;
+        }
+        if(ext2fs_test_inode_bitmap2(dup_sm, ino)) {
+                ext2fs_icount_increment(dest,ino,NULL);
+                ext2fs_unmark_inode_bitmap2(src->single, ino);
+                links_count++;
+        }
+        if(ext2fs_test_inode_bitmap2(dup_ms, ino)){         
+                ext2fs_icount_increment(src,ino,NULL);
+                ext2fs_unmark_inode_bitmap2(dest->single, ino);
+                links_count++;
+        }
+    }
+	if (src->fullmap)
+		return ext2fs_icount_merge_full_map(src, dest);
+
+	retval = ext2fs_merge_bitmap(src->single, dest->single, NULL,
+				     NULL);
+
+	if (retval)
+		return retval;
+
+	if (src->multiple) {
+		retval = ext2fs_merge_bitmap(src->multiple, dest->multiple,
+					     NULL, NULL);
+		if (retval)
+			return retval;
+	}
+
+	ext2fs_free_inode_bitmap(dup_ss);
+	ext2fs_free_inode_bitmap(dup_sm);
+	ext2fs_free_inode_bitmap(dup_ms);
+
+	retval = ext2fs_pipeline_icount_merge_el(src, dest);
+//	if (retval)
+//		return retval;
+
+	return links_count + retval;
+}
 errcode_t ext2fs_icount_merge(ext2_icount_t src, ext2_icount_t dest)
 {
 	errcode_t	retval;

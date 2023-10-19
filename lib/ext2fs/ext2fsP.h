@@ -42,6 +42,14 @@ struct ext2_struct_u32_iterate {
 	int			ptr;
 };
 
+struct ext2_struct_dclist{
+	ext2_filsys		fs;
+	unsigned long long	size;
+	unsigned long long	count;
+	struct ext2_dc_entry *	list;
+};
+
+
 
 /*
  * Directory block iterator definition
@@ -53,6 +61,12 @@ struct ext2_struct_dblist {
 	unsigned long long	count;
 	int			sorted;
 	struct ext2_db_entry2 *	list;
+
+#ifdef HAVE_PTHREAD
+    unsigned long long last_checked;
+    pthread_rwlock_t rwlock;
+#endif
+
 };
 
 /*

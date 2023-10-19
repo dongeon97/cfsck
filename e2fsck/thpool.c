@@ -45,52 +45,7 @@ static volatile int threads_on_hold;
 
 
 
-/* ========================== STRUCTURES ============================ */
 
-
-/* Binary semaphore */
-typedef struct bsem {
-	pthread_mutex_t mutex;
-	pthread_cond_t   cond;
-	int v;
-} bsem;
-
-
-/* Job */
-typedef struct job{
-	struct job*  prev;                   /* pointer to previous job   */
-	void   (*function)(void* arg);       /* function pointer          */
-	void*  arg;                          /* function's argument       */
-} job;
-
-
-/* Job queue */
-typedef struct jobqueue{
-	pthread_mutex_t rwmutex;             /* used for queue r/w access */
-	job  *front;                         /* pointer to front of queue */
-	job  *rear;                          /* pointer to rear  of queue */
-	bsem *has_jobs;                      /* flag as binary semaphore  */
-	int   len;                           /* number of jobs in queue   */
-} jobqueue;
-
-
-/* Thread */
-typedef struct thread{
-	int       id;                        /* friendly id               */
-	pthread_t pthread;                   /* pointer to actual thread  */
-	struct thpool_* thpool_p;            /* access to thpool          */
-} thread;
-
-
-/* Threadpool */
-typedef struct thpool_{
-	thread**   threads;                  /* pointer to threads        */
-	volatile int num_threads_alive;      /* threads currently alive   */
-	volatile int num_threads_working;    /* threads currently working */
-	pthread_mutex_t  thcount_lock;       /* used for thread count etc */
-	pthread_cond_t  threads_all_idle;    /* signal to thpool_wait     */
-	jobqueue  jobqueue;                  /* job queue                 */
-} thpool_;
 
 
 
@@ -107,6 +62,7 @@ static void  thread_destroy(struct thread* thread_p);
 static int   jobqueue_init(jobqueue* jobqueue_p);
 static void  jobqueue_clear(jobqueue* jobqueue_p);
 static void  jobqueue_push(jobqueue* jobqueue_p, struct job* newjob_p);
+static void  jobqueue_push_to_front(jobqueue* jobqueue_p, struct job* newjob);
 static struct job* jobqueue_pull(jobqueue* jobqueue_p);
 static void  jobqueue_destroy(jobqueue* jobqueue_p);
 
@@ -142,6 +98,7 @@ struct thpool_* thpool_init(int num_threads){
 	}
 	thpool_p->num_threads_alive   = 0;
 	thpool_p->num_threads_working = 0;
+	thpool_p->num_threads_borrowed = 0;
 
 	/* Initialise the job queue */
 	if (jobqueue_init(&thpool_p->jobqueue) == -1){
@@ -191,6 +148,9 @@ int thpool_add_work(thpool_* thpool_p, void (*function_p)(void*), void* arg_p){
 	/* add function and argument */
 	newjob->function=function_p;
 	newjob->arg=arg_p;
+
+	newjob->type = 0;
+
 
 	/* add job to queue */
 	jobqueue_push(&thpool_p->jobqueue, newjob);
@@ -295,6 +255,8 @@ static int thread_init (thpool_* thpool_p, struct thread** thread_p, int id){
 
 	(*thread_p)->thpool_p = thpool_p;
 	(*thread_p)->id       = id;
+	(*thread_p)->borrowed = 0;
+	(*thread_p)->orig_tpool = thpool_p;
 
 	pthread_create(&(*thread_p)->pthread, NULL, (void * (*)(void *)) thread_do, (*thread_p));
 	pthread_detach((*thread_p)->pthread);
@@ -367,19 +329,105 @@ static void* thread_do(struct thread* thread_p){
 			void*  arg_buff;
 			job* job_p = jobqueue_pull(&thpool_p->jobqueue);
 			if (job_p) {
-				func_buff = job_p->function;
-				arg_buff  = job_p->arg;
-				func_buff(arg_buff);
-				free(job_p);
-			}
+				//func_buff = job_p->function;
+				//arg_buff  = job_p->arg;
+				//func_buff(arg_buff);
+				//free(job_p);
+				switch(job_p->type){
+					/*If job is set to borrow thread*/
+					case 1:
+						// we want to decrement this original thread pool working counter 
+						// we don't want to decrement the new thread pool working counter
 
-			pthread_mutex_lock(&thpool_p->thcount_lock);
-			thpool_p->num_threads_working--;
-			if (!thpool_p->num_threads_working) {
-				pthread_cond_signal(&thpool_p->threads_all_idle);
-			}
-			pthread_mutex_unlock(&thpool_p->thcount_lock);
+						// Decrement threads working counter for originating thread pool
+						pthread_mutex_lock(&thpool_p->thcount_lock);
+						
+						// Decrement this this pool alive counter
+						thpool_p->num_threads_alive--;
+						thpool_p->num_threads_working--;
+						if (!thpool_p->num_threads_working) {
+							pthread_cond_signal(&thpool_p->threads_all_idle);
+						}
+						pthread_mutex_unlock(&thpool_p->thcount_lock);
+	
+						// Simply set the tpool pointer and mark thread as borrowed
+						thpool_p = job_p->new_tpool;
+						
+						// Increment new threadpool alive counter
+						pthread_mutex_lock(&thpool_p->thcount_lock);
+						thpool_p->num_threads_alive++;
+						pthread_mutex_unlock(&thpool_p->thcount_lock);
+						
+						thread_p->borrowed = 1;
 
+						free(job_p); 
+						break;
+					/*If job is set to release borrowed thread*/
+					case -1:
+						if(!thread_p->borrowed){
+							printf("Tried to release unborrowed thread!");
+							free(job_p);
+							break;
+						}
+
+
+						// we want to decrement the borrowing thread pool working counter
+						// we dont want to decrement the original thread pool working 
+						
+						// HOW WILL WAITING HAPPEN if threads are assigned to 
+						// when no work, scheduler will retract threads which will ensure there will be no working threads
+
+
+						// Decrement threads working counter for borrowing thread pool
+						pthread_mutex_lock(&thpool_p->thcount_lock);
+						
+						// decrement borrowing thread pool alive counter
+						thpool_p->num_threads_alive--;
+						
+						thpool_p->num_threads_working--;
+						if (!thpool_p->num_threads_working) {
+							pthread_cond_signal(&thpool_p->threads_all_idle);
+						}
+						pthread_mutex_unlock(&thpool_p->thcount_lock);
+				
+
+						// Set back to original threadpool
+						thpool_p = thread_p->orig_tpool;
+						// Increment original threadpool alive counter
+						pthread_mutex_lock(&thpool_p->thcount_lock);
+						thpool_p->num_threads_alive++;
+						pthread_mutex_unlock(&thpool_p->thcount_lock);
+						
+						thread_p->borrowed = 0;
+
+						free(job_p);
+						break;
+					/* Run job as normal */
+					default:
+						func_buff = job_p->function;
+						arg_buff = job_p->arg;
+						func_buff(arg_buff);
+						free(job_p);
+						
+						// Decrement threads working counter
+						pthread_mutex_lock(&thpool_p->thcount_lock);
+						thpool_p->num_threads_working--;
+						if (!thpool_p->num_threads_working) {
+							pthread_cond_signal(&thpool_p->threads_all_idle);
+						}
+						pthread_mutex_unlock(&thpool_p->thcount_lock);
+				
+				}	
+
+			}else{
+
+				pthread_mutex_lock(&thpool_p->thcount_lock);
+				thpool_p->num_threads_working--;
+				if (!thpool_p->num_threads_working) {
+					pthread_cond_signal(&thpool_p->threads_all_idle);
+				}
+				pthread_mutex_unlock(&thpool_p->thcount_lock);
+			}
 		}
 	}
 	pthread_mutex_lock(&thpool_p->thcount_lock);
@@ -395,7 +443,72 @@ static void thread_destroy (thread* thread_p){
 	free(thread_p);
 }
 
+// Requirement source tpool, but not be meta or else stack will increase as borrowing ensues
+int borrow_threads(thpool_* thpool1, thpool_* thpool2, int n){
+	int x;
+	job* newjob;
 
+	// Check to see if there if there enough threads to borrow
+	//printf("Threads Alive in first thread pool %d\n", thpool1->num_threads_alive);
+	if (n > thpool1->num_threads_alive - thpool1->num_threads_borrowed){
+		printf("Tried to borrow more threads from source than available");
+		return -1;
+	}
+
+	for(x = 0; x < n; x++){
+		newjob=(struct job*)malloc(sizeof(struct job));
+		if (newjob==NULL){
+			err("thpool_add_work(): Could not allocate memory for new job\n");
+			return -1;
+		}
+		newjob->type = 1;
+		newjob->new_tpool = thpool2;
+
+		/* add job to queue */
+		jobqueue_push_to_front(&thpool1->jobqueue, newjob);
+	}
+
+	return 0;
+}
+
+
+int release_borrowed_threads(thpool_* thpool_p, int n){
+	int x;
+	job* newjob;
+
+	// Check if thread pool has threads to release
+	if(n > thpool_p->num_threads_alive){
+		printf("Tried to release more threads than it has: Try release %d, has %d\n", n, thpool_p->num_threads_alive);
+		return -1;
+	}
+
+	for(x = 0; x < n; x++){
+		newjob=(struct job*)malloc(sizeof(struct job));
+		if (newjob==NULL){
+			err("thpool_add_work(): Could not allocate memory for new job\n");
+			return -1;
+		}
+
+		newjob->type = -1;
+		// original threadpool stored in  thread
+
+		/* add job to queue */
+		jobqueue_push_to_front(&thpool_p->jobqueue, newjob);
+	}
+
+	return 0;
+
+}
+
+int thpool_get_alive_count(thpool_* thpool_p){
+	//pthread_mutex_lock(&thpool_p->thcount_lock);
+	return thpool_p->num_threads_alive;
+	//pthread_mutex_unlock(&thpool_p->thcount_lock);
+}
+
+int get_queue_length(thpool_* thpool_p){
+	return thpool_p->jobqueue.len;
+}
 
 
 
@@ -460,6 +573,30 @@ static void jobqueue_push(jobqueue* jobqueue_p, struct job* newjob){
 	pthread_mutex_unlock(&jobqueue_p->rwmutex);
 }
 
+static void jobqueue_push_to_front(jobqueue* jobqueue_p, struct job* newjob){
+
+	pthread_mutex_lock(&jobqueue_p->rwmutex);
+	newjob->prev = NULL;
+
+	switch(jobqueue_p->len){
+
+		case 0:  /* if no jobs in queue */
+					jobqueue_p->front = newjob;
+					jobqueue_p->rear  = newjob;
+					break;
+
+		default: /* if jobs in queue */
+					//jobqueue_p->rear->prev = newjob;
+					//jobqueue_p->rear = newjob;
+					
+					newjob->prev = jobqueue_p->front;
+					jobqueue_p->front = newjob;
+	}
+	jobqueue_p->len++;
+
+	bsem_post(jobqueue_p->has_jobs);
+	pthread_mutex_unlock(&jobqueue_p->rwmutex);
+}
 
 /* Get first job from queue(removes it from queue)
  * Notice: Caller MUST hold a mutex

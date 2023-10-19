@@ -40,6 +40,7 @@ errcode_t ext2fs_dup_handle(ext2_filsys src, ext2_filsys *dest)
 	fs->block_map = 0;
 	fs->badblocks = 0;
 	fs->dblist = 0;
+    fs->dclist = 0;
 	fs->mmp_buf = 0;
 	fs->mmp_cmp = 0;
 	fs->mmp_fd = -1;
@@ -87,6 +88,11 @@ errcode_t ext2fs_dup_handle(ext2_filsys src, ext2_filsys *dest)
 	}
 	if (src->dblist) {
 		retval = ext2fs_copy_dblist(src->dblist, &fs->dblist);
+		if (retval)
+			goto errout;
+	}
+	if (src->dclist) {
+		retval = ext2fs_copy_dclist(src->dclist, &fs->dclist);
 		if (retval)
 			goto errout;
 	}

@@ -868,11 +868,12 @@ errcode_t ext2fs_read_inode2(ext2_filsys fs, ext2_ino_t ino,
 		fs->icache->cache_last = cache_slot;
 		fs->icache->cache[cache_slot].ino = ino;
 	}
-	memcpy(inode, iptr, (bufsize > length) ? length : bufsize);
+    memcpy(inode, iptr, (bufsize > length) ? length : bufsize);
 
 	if (!(fs->flags & EXT2_FLAG_IGNORE_CSUM_ERRORS) &&
-	    !(flags & READ_INODE_NOCSUM) && fail_csum)
-		return EXT2_ET_INODE_CSUM_INVALID;
+	    !(flags & READ_INODE_NOCSUM) && fail_csum){
+        return EXT2_ET_INODE_CSUM_INVALID;
+    }
 
 	return 0;
 }

@@ -121,6 +121,21 @@ errcode_t ext2fs_copy_dblist(ext2_dblist src, ext2_dblist *dest)
 	return 0;
 }
 
+errcode_t ext2fs_copy_dblist_range(ext2_dblist src, ext2_dblist *dest,
+        unsigned long long start, unsigned long long count)
+{
+	ext2_dblist	dblist;
+	errcode_t	retval;
+
+	retval = make_dblist(src->fs, count, count, &src->list[start],
+			     &dblist);
+	if (retval)
+		return retval;
+	dblist->sorted = src->sorted;
+	*dest = dblist;
+	return 0;
+}
+
 /*
  * Merge a directory block list @src to @dest
  */
@@ -187,6 +202,7 @@ errcode_t ext2fs_add_dir_block2(ext2_dblist dblist, ext2_ino_t ino,
 			return retval;
 		}
 	}
+
 	new_entry = dblist->list + ( dblist->count++);
 	new_entry->blk = blk;
 	new_entry->ino = ino;

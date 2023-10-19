@@ -308,8 +308,9 @@ static errcode_t ext2fs_dirent_csum(ext2_filsys fs, ext2_ino_t inum,
 	struct ext2_inode inode;
 
 	retval = ext2fs_read_inode(fs, inum, &inode);
-	if (retval)
+	if (retval){
 		return retval;
+    }
 
 	inum = ext2fs_cpu_to_le32(inum);
 	gen = ext2fs_cpu_to_le32(inode.i_generation);
@@ -340,6 +341,7 @@ int ext2fs_dirent_csum_verify(ext2_filsys fs, ext2_ino_t inum,
 				    (char *)t - (char *)dirent);
 	if (retval)
 		return 0;
+
 	return ext2fs_le32_to_cpu(t->det_checksum) == calculated;
 }
 
