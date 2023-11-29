@@ -296,6 +296,7 @@ int e2fsck_run(e2fsck_t ctx)
 	ctx->flags |= E2F_FLAG_SETJMP_OK;
 #endif
     //display_mallinfo(__func__);
+    double total_time = 0.00;
 
 	for (i=0; (e2fsck_pass = e2fsck_passes[i]); i++) {
 		if (ctx->flags & E2F_FLAG_RUN_RETURN)
@@ -305,12 +306,13 @@ int e2fsck_run(e2fsck_t ctx)
 		gettimeofday(&time_start, 0);
 		e2fsck_pass(ctx);
 		gettimeofday(&time_end, 0);
-     //   display_mallinfo(__func__);
 		printf("time taken by %d: %5.2f\n", i,
 				timeval_subtract(&time_end, &time_start));
+        total_time += timeval_subtract(&time_end, &time_start);
 		if (ctx->progress)
 			(void) (ctx->progress)(ctx, 0, 0, 0);
 	}
+	printf("[Exp] Total time : %5.2f\n", total_time);
 	ctx->flags &= ~E2F_FLAG_SETJMP_OK;
 
     if(ctx->pfs_num_dynamic_threads > 1){
