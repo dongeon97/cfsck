@@ -10,6 +10,7 @@
 #endif
 #include <string.h>
 #include <time.h>
+#include <malloc.h>
 
 #include "ext2_fs.h"
 #include "ext2fsP.h"
@@ -75,8 +76,11 @@ errcode_t ext2fs_init_dclist(ext2_filsys fs, ext2_dclist *ret_dclist)
 	errcode_t	retval;
 
 	retval = make_dclist(fs, 0, 0, 0, &dclist);
+    pthread_mutex_init(&dclist->lock,NULL);
+
 	if (retval)
 		return retval;
+
 
 	if (ret_dclist)
 		*ret_dclist = dclist;
@@ -131,18 +135,23 @@ errcode_t ext2fs_merge_dclist(ext2_dclist src, ext2_dclist dest)
 
 	if (src_count == 0)
 		return 0;
+    
+    printf("size : %llu in %s\n",size, __func__);
+    dest->list = (ext2_dclist)realloc(dest->list,size*size_entry); 
+	//retval = ext2fs_get_array(size, size_entry, &array);
+	//if (retval)
+	//	return retval;
 
-	retval = ext2fs_get_array(size, size_entry, &array);
-	if (retval)
-		return retval;
-
-	array2 = array;
+	array = dest->list;
+    array += dest_count;
 	memcpy(array, src->list, src_count * size_entry);
+    /*
 	array += src_count;
 	memcpy(array, dest->list, dest_count * size_entry);
 	ext2fs_free_mem(&dest->list);
+    */
 
-	dest->list = array2;
+	//dest->list = array2;
 	dest->count = src_count + dest_count;
 	dest->size = size;
 

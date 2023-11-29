@@ -99,6 +99,7 @@ struct thpool_* thpool_init(int num_threads){
 	thpool_p->num_threads_alive   = 0;
 	thpool_p->num_threads_working = 0;
 	thpool_p->num_threads_borrowed = 0;
+	thpool_p->orig_num   = num_threads;
 
 	/* Initialise the job queue */
 	if (jobqueue_init(&thpool_p->jobqueue) == -1){
@@ -175,6 +176,7 @@ void thpool_destroy(thpool_* thpool_p){
 	if (thpool_p == NULL) return ;
 
 	volatile int threads_total = thpool_p->num_threads_alive;
+	//volatile int threads_total = thpool_p->orig_num;
 
 	/* End each thread 's infinite loop */
 	threads_keepalive = 0;
@@ -365,12 +367,19 @@ static void* thread_do(struct thread* thread_p){
 					/*If job is set to release borrowed thread*/
 					case -1:
 						if(!thread_p->borrowed){
-							printf("Tried to release unborrowed thread!");
-							free(job_p);
+							//printf("Tried to release unborrowed thread!");
+						//	free(job_p);
+		                    jobqueue_push_to_front(&thpool_p->jobqueue, job_p);
+                            pthread_mutex_lock(&thpool_p->thcount_lock);
+                            thpool_p->num_threads_working--;
+                            if (!thpool_p->num_threads_working) {
+                                pthread_cond_signal(&thpool_p->threads_all_idle);
+                            }
+                            pthread_mutex_unlock(&thpool_p->thcount_lock);
 							break;
 						}
 
-
+						//printf("Tried to release unborrowed thread!\n");
 						// we want to decrement the borrowing thread pool working counter
 						// we dont want to decrement the original thread pool working 
 						

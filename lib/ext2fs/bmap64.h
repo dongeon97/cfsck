@@ -2,9 +2,7 @@
  * bmap64.h --- 64-bit bitmap structure
  *
  * Copyright (C) 2007, 2008 Theodore Ts'o.
- *
- * %Begin-Header%
- * This file may be redistributed under the terms of the GNU Public
+ * * %Begin-Header% * This file may be redistributed under the terms of the GNU Public
  * License.
  * %End-Header%
  */
@@ -48,6 +46,7 @@ struct ext2fs_struct_generic_bitmap_64 {
 	char			*description;
 	void			*private;
 	errcode_t		base_error_code;
+    __u64       num;
 #ifdef ENABLE_BMAP_STATS
 	struct ext2_bmap_statistics	stats;
 #endif
@@ -107,7 +106,16 @@ struct ext2_bitmap_ops {
 	errcode_t (*find_dup)(ext2fs_generic_bitmap_64 src,
 				ext2fs_generic_bitmap_64 dest,
 				ext2fs_generic_bitmap_64 dup);
+	errcode_t (*count_dup)(ext2fs_generic_bitmap_64 src,
+				ext2fs_generic_bitmap_64 dest,
+				ext2fs_generic_bitmap_64 dup,
+				ext2fs_generic_bitmap_64 dup_allowed);
+    __u16 (*get_bmap_extent)(ext2fs_generic_bitmap_64 bitmap,
+            __u64 start); 
+    int (*increment_bmap)(ext2fs_generic_bitmap_64 bitmap,
+            __u64 start, int num); 
 };
 
 extern struct ext2_bitmap_ops ext2fs_blkmap64_bitarray;
 extern struct ext2_bitmap_ops ext2fs_blkmap64_rbtree;
+extern struct ext2_bitmap_ops ext2fs_blkmap64_rbtree2;

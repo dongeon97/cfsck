@@ -110,6 +110,9 @@ errcode_t ext2fs_alloc_generic_bmap(ext2_filsys fs, errcode_t magic,
 	case EXT2FS_BMAP64_RBTREE:
 		ops = &ext2fs_blkmap64_rbtree;
 		break;
+	case EXT2FS_BMAP64_RBTREE2:
+		ops = &ext2fs_blkmap64_rbtree2;
+		break;
 	case EXT2FS_BMAP64_AUTODIR:
 		retval = ext2fs_get_num_dirs(fs, &num_dirs);
 		if (retval || num_dirs > (fs->super->s_inodes_count / 320))
@@ -362,15 +365,44 @@ errcode_t ext2fs_merge_generic_bmap(ext2fs_generic_bitmap gen_src,
 		(dup_allowed && !EXT2FS_IS_64_BITMAP(dup_allowed)))
 		return EINVAL;
 
-	if (src->bitmap_ops != dest->bitmap_ops ||
+/*	if (src->bitmap_ops != dest->bitmap_ops ||
 	    (dup && src->bitmap_ops != dup->bitmap_ops) ||
 	    (dup_allowed && src->bitmap_ops != dup_allowed->bitmap_ops))
 		return EINVAL;
-
+*/
 	if (src->bitmap_ops->merge_bmap == NULL)
 		return EOPNOTSUPP;
 
 	return src->bitmap_ops->merge_bmap(src, dest, dup, dup_allowed);
+}
+
+errcode_t ext2fs_count_generic_bmap(ext2fs_generic_bitmap gen_src,
+				    ext2fs_generic_bitmap gen_dest,
+				    ext2fs_generic_bitmap gen_dup,
+				    ext2fs_generic_bitmap gen_dup_allowed)
+{
+	ext2fs_generic_bitmap_64 src = (ext2fs_generic_bitmap_64)gen_src;
+	ext2fs_generic_bitmap_64 dest = (ext2fs_generic_bitmap_64)gen_dest;
+	ext2fs_generic_bitmap_64 dup = (ext2fs_generic_bitmap_64)gen_dup;
+	ext2fs_generic_bitmap_64 dup_allowed = (ext2fs_generic_bitmap_64)gen_dup_allowed;
+
+	if (!src || !dest)
+		return EINVAL;
+
+	if (!EXT2FS_IS_64_BITMAP(src) || !EXT2FS_IS_64_BITMAP(dest) ||
+	    (dup && !EXT2FS_IS_64_BITMAP(dup)) ||
+		(dup_allowed && !EXT2FS_IS_64_BITMAP(dup_allowed)))
+		return EINVAL;
+
+/*	if (src->bitmap_ops != dest->bitmap_ops ||
+	    (dup && src->bitmap_ops != dup->bitmap_ops) ||
+	    (dup_allowed && src->bitmap_ops != dup_allowed->bitmap_ops))
+		return EINVAL;
+*/
+	if (src->bitmap_ops->merge_bmap == NULL)
+		return EOPNOTSUPP;
+
+	return src->bitmap_ops->count_dup(src, dest, dup, dup_allowed);
 }
 
 errcode_t ext2fs_find_dup_generic_bmap(ext2fs_generic_bitmap gen_src,
@@ -388,9 +420,9 @@ errcode_t ext2fs_find_dup_generic_bmap(ext2fs_generic_bitmap gen_src,
 	    !EXT2FS_IS_64_BITMAP(dup))
 		return EINVAL;
 
-	if (src->bitmap_ops != dest->bitmap_ops || 
-	    (src->bitmap_ops != dup->bitmap_ops))
-		return EINVAL;
+//	if (src->bitmap_ops != dest->bitmap_ops || 
+//	    (src->bitmap_ops != dup->bitmap_ops))
+//		return EINVAL;
 
 	if (src->bitmap_ops->find_dup == NULL)
 		return EOPNOTSUPP;
@@ -492,6 +524,7 @@ void ext2fs_clear_generic_bmap(ext2fs_generic_bitmap gen_bitmap)
 	else
 		bitmap->bitmap_ops->clear_bmap(bitmap);
 }
+
 
 int ext2fs_mark_generic_bmap(ext2fs_generic_bitmap gen_bitmap,
 			     __u64 arg)
@@ -600,6 +633,136 @@ int ext2fs_test_generic_bmap(ext2fs_generic_bitmap gen_bitmap,
 	}
 
 	return bitmap->bitmap_ops->test_bmap(bitmap, arg);
+}
+
+int ext2fs_increment_generic_bmap(ext2fs_generic_bitmap gen_bitmap,
+			     __u32 arg, int num)
+{
+	ext2fs_generic_bitmap_64 bitmap = (ext2fs_generic_bitmap_64) gen_bitmap;
+
+	if (!bitmap)
+		return 0;
+
+	if (EXT2FS_IS_32_BITMAP(bitmap)) {
+		if (arg & ~0xffffffffULL) {
+			ext2fs_warn_bitmap2(gen_bitmap,
+					    EXT2FS_MARK_ERROR, 0xffffffff);
+			return 0;
+		}
+		return ext2fs_mark_generic_bitmap(gen_bitmap, arg);
+	}
+
+	if (!EXT2FS_IS_64_BITMAP(bitmap))
+		return 0;
+
+	arg >>= bitmap->cluster_bits;
+
+#ifdef ENABLE_BMAP_STATS_OPS
+	if (arg == bitmap->stats.last_marked + 1)
+		bitmap->stats.mark_seq++;
+	if (arg < bitmap->stats.last_marked)
+		bitmap->stats.mark_back++;
+	bitmap->stats.last_marked = arg;
+	bitmap->stats.mark_count++;
+#endif
+
+	if ((arg < bitmap->start) || (arg > bitmap->end)) {
+		warn_bitmap(bitmap, EXT2FS_MARK_ERROR, arg);
+		return 0;
+	}
+
+	return bitmap->bitmap_ops->increment_bmap(bitmap, arg, num);
+}
+
+__u64 ext2fs_get_generic_bmap_num(ext2fs_generic_bitmap gen_bitmap)
+{
+	ext2fs_generic_bitmap_64 bitmap = (ext2fs_generic_bitmap_64) gen_bitmap;
+
+	if (!bitmap)
+		return 0;
+
+	if (!EXT2FS_IS_64_BITMAP(bitmap))
+		return 0;
+
+	return bitmap->num;
+}
+
+__u64 ext2fs_set_generic_bmap_num(ext2fs_generic_bitmap gen_bitmap,
+			     __u64 arg)
+{
+	ext2fs_generic_bitmap_64 bitmap = (ext2fs_generic_bitmap_64) gen_bitmap;
+
+	if (!bitmap)
+		return 0;
+
+	if (EXT2FS_IS_32_BITMAP(bitmap)) {
+		if (arg & ~0xffffffffULL) {
+			ext2fs_warn_bitmap2(gen_bitmap,
+					    EXT2FS_MARK_ERROR, 0xffffffff);
+			return 0;
+		}
+		return ext2fs_mark_generic_bitmap(gen_bitmap, arg);
+	}
+
+	if (!EXT2FS_IS_64_BITMAP(bitmap))
+		return 0;
+
+	arg >>= bitmap->cluster_bits;
+
+#ifdef ENABLE_BMAP_STATS_OPS
+	if (arg == bitmap->stats.last_marked + 1)
+		bitmap->stats.mark_seq++;
+	if (arg < bitmap->stats.last_marked)
+		bitmap->stats.mark_back++;
+	bitmap->stats.last_marked = arg;
+	bitmap->stats.mark_count++;
+#endif
+
+	if ((arg < bitmap->start) || (arg > bitmap->end)) {
+		warn_bitmap(bitmap, EXT2FS_MARK_ERROR, arg);
+		return 0;
+	}
+
+    bitmap->num = arg;
+	return bitmap->num;
+}
+
+__u64 ext2fs_get_generic_bmap_count(ext2fs_generic_bitmap gen_bitmap,
+			     __u64 arg)
+{
+	ext2fs_generic_bitmap_64 bitmap = (ext2fs_generic_bitmap_64) gen_bitmap;
+	if (!bitmap)
+		return 0;
+
+	if (EXT2FS_IS_32_BITMAP(bitmap)) {
+		if (arg & ~0xffffffffULL) {
+			ext2fs_warn_bitmap2(gen_bitmap, EXT2FS_TEST_ERROR,
+					    0xffffffff);
+			return 0;
+		}
+		return ext2fs_test_generic_bitmap(gen_bitmap, arg);
+	}
+
+	if (!EXT2FS_IS_64_BITMAP(bitmap))
+		return 0;
+
+	arg >>= bitmap->cluster_bits;
+
+#ifdef ENABLE_BMAP_STATS_OPS
+	bitmap->stats.test_count++;
+	if (arg == bitmap->stats.last_tested + 1)
+		bitmap->stats.test_seq++;
+	if (arg < bitmap->stats.last_tested)
+		bitmap->stats.test_back++;
+	bitmap->stats.last_tested = arg;
+#endif
+
+	if ((arg < bitmap->start) || (arg > bitmap->end)) {
+		warn_bitmap(bitmap, EXT2FS_TEST_ERROR, arg);
+		return 0;
+	}
+
+	return bitmap->bitmap_ops->get_bmap_extent(bitmap, arg);
 }
 
 errcode_t ext2fs_set_generic_bmap_range(ext2fs_generic_bitmap gen_bmap,

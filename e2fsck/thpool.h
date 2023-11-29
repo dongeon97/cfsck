@@ -64,6 +64,7 @@ typedef struct thpool_{
 	jobqueue  jobqueue;                  /* job queue                 */
 
 	int num_threads_borrowed; // How many threads are borrowed
+    int orig_num;
 } thpool_;
 
 

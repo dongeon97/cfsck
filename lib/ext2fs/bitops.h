@@ -132,6 +132,12 @@ extern int ext2fs_unmark_block_bitmap2(ext2fs_block_bitmap bitmap,
 				       blk64_t block);
 extern int ext2fs_test_block_bitmap2(ext2fs_block_bitmap bitmap,
 				     blk64_t block);
+extern int ext2fs_increment_inode_bitmap2(ext2fs_inode_bitmap bitmap,
+				     ext2_ino_t inode,int num);
+
+extern __u64 ext2fs_get_inode_bitmap_num2(ext2fs_inode_bitmap bitmap);
+
+extern __u64 ext2fs_set_inode_bitmap_num2(ext2fs_inode_bitmap bitmap, __u64 num);
 
 extern int ext2fs_mark_inode_bitmap2(ext2fs_inode_bitmap bitmap,
 				     ext2_ino_t inode);
@@ -153,6 +159,8 @@ extern void ext2fs_fast_unmark_inode_bitmap2(ext2fs_inode_bitmap bitmap,
 					    ext2_ino_t inode);
 extern int ext2fs_fast_test_inode_bitmap2(ext2fs_inode_bitmap bitmap,
 					  ext2_ino_t inode);
+extern __u16 ext2fs_get_inode_bitmap_count2(ext2fs_inode_bitmap bitmap,
+                      ext2_ino_t inode);
 extern errcode_t ext2fs_find_first_zero_block_bitmap2(ext2fs_block_bitmap bitmap,
 						      blk64_t start,
 						      blk64_t end,
@@ -201,6 +209,14 @@ extern int ext2fs_test_block_bitmap_range2(ext2fs_block_bitmap bitmap,
 					   blk64_t block, unsigned int num);
 extern __u64 ext2fs_get_generic_bmap_start(ext2fs_generic_bitmap bitmap);
 extern __u64 ext2fs_get_generic_bmap_end(ext2fs_generic_bitmap bitmap);
+extern __u64 ext2fs_get_generic_bmap_count(ext2fs_generic_bitmap gen_bitmap, __u64 arg);
+extern int ext2fs_increment_generic_bmap(ext2fs_generic_bitmap bitmap,
+				     ext2_ino_t inode, int num);
+
+extern __u64 ext2fs_get_generic_bmap_num(ext2fs_generic_bitmap bitmap);
+
+extern __u64 ext2fs_set_generic_bmap_num(ext2fs_generic_bitmap bitmap, __u64 arg);
+
 extern int ext2fs_test_block_bitmap_range2(ext2fs_block_bitmap bitmap,
 					   blk64_t block, unsigned int num);
 extern void ext2fs_mark_block_bitmap_range2(ext2fs_block_bitmap bitmap,
@@ -492,6 +508,30 @@ _INLINE_ int ext2fs_fast_test_inode_bitmap2(ext2fs_inode_bitmap bitmap,
 					    ext2_ino_t inode)
 {
 	return ext2fs_test_generic_bmap((ext2fs_generic_bitmap) bitmap,
+					inode);
+}
+
+_INLINE_ int ext2fs_increment_inode_bitmap2(ext2fs_inode_bitmap bitmap,
+				       ext2_ino_t inode, int num)
+{
+	return ext2fs_increment_generic_bmap((ext2fs_generic_bitmap) bitmap,
+					inode, num);
+}
+
+_INLINE_ __u64 ext2fs_get_inode_bitmap_num2(ext2fs_inode_bitmap bitmap)
+{
+	return ext2fs_get_generic_bmap_num((ext2fs_generic_bitmap) bitmap);
+}
+
+_INLINE_ __u64 ext2fs_set_inode_bitmap_num2(ext2fs_inode_bitmap bitmap, __u64 arg)
+{
+	return ext2fs_set_generic_bmap_num((ext2fs_generic_bitmap) bitmap, arg);
+}
+
+_INLINE_ __u16 ext2fs_get_inode_bitmap_count2(ext2fs_inode_bitmap bitmap,
+				       ext2_ino_t inode)
+{
+	return (__u16) ext2fs_get_generic_bmap_count((ext2fs_generic_bitmap) bitmap,
 					inode);
 }
 

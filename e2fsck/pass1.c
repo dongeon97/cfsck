@@ -45,6 +45,7 @@
 #define _GNU_SOURCE 1 /* get strnlen() */
 #include "config.h"
 #include <string.h>
+#include <stdlib.h>
 #include <time.h>
 #ifdef HAVE_ERRNO_H
 #include <errno.h>
@@ -65,6 +66,7 @@
 #include "thpool.h"
 #include "scheduler.h"
 #include <sys/sysinfo.h>
+#include <malloc.h>
 
 #ifdef NO_INLINE_FUNCS
 #define _INLINE_
@@ -79,6 +81,7 @@ struct ea_quota {
 	__u64 inodes;
 };
 
+static int e2fsck_pipeline_threadpool_start(e2fsck_t global_ctx);
 static int process_block(ext2_filsys fs, blk64_t	*blocknr,
 			 e2_blkcnt_t blockcnt, blk64_t ref_blk,
 			 int ref_offset, void *priv_data);
@@ -99,6 +102,27 @@ static errcode_t scan_callback(ext2_filsys fs, ext2_inode_scan scan,
 static void adjust_extattr_refcount(e2fsck_t ctx, ext2_refcount_t refcount,
 				    char *block_buf, int adjust_sign);
 /* static char *describe_illegal_block(ext2_filsys fs, blk64_t block); */
+static void
+display_mallinfo(void)
+{
+    struct mallinfo mi;
+
+    mi = mallinfo();
+
+    printf("DISPLAY MEMORY USAGE\n");
+    printf("Total non-mmapped bytes (arena):       %zu\n", mi.arena);
+    printf("# of free chunks (ordblks):            %zu\n", mi.ordblks);
+    printf("# of free fastbin blocks (smblks):     %zu\n", mi.smblks);
+    printf("# of mapped regions (hblks):           %zu\n", mi.hblks);
+    printf("Bytes in mapped regions (hblkhd):      %zu\n", mi.hblkhd);
+    printf("Max. total allocated space (usmblks):  %zu\n", mi.usmblks);
+    printf("Free bytes held in fastbins (fsmblks): %zu\n", mi.fsmblks);
+    printf("Total allocated space (uordblks):      %zu\n", mi.uordblks);
+    printf("Total free space (fordblks):           %zu\n", mi.fordblks);
+    printf("Topmost releasable block (keepcost):   %zu\n", mi.keepcost);
+    printf("\n");
+}
+
 
 struct process_block_struct {
 	ext2_ino_t	ino;
@@ -918,8 +942,14 @@ extern errcode_t e2fsck_setup_icount(e2fsck_t ctx, const char *icount_name,
 		if (retval == 0)
 			return 0;
 	}
-	e2fsck_set_bitmap_type(ctx->fs, EXT2FS_BMAP64_RBTREE, icount_name,
-			       &save_type);
+    if(flags & EXT2_ICOUNT_OPT_RBTREE2){
+        e2fsck_set_bitmap_type(ctx->fs, EXT2FS_BMAP64_RBTREE2, icount_name,
+                       &save_type);
+    }else{
+        e2fsck_set_bitmap_type(ctx->fs, EXT2FS_BMAP64_RBTREE, icount_name,
+                       &save_type);
+    }
+
 	if (ctx->options & E2F_OPT_ICOUNT_FULLMAP)
 		flags |= EXT2_ICOUNT_OPT_FULLMAP;
 	retval = ext2fs_create_icount2(ctx->fs, flags, 0, hint, ret);
@@ -1779,6 +1809,7 @@ static errcode_t e2fsck_pass1_prepare(e2fsck_t ctx)
 
 	pctx.errcode = e2fsck_allocate_subcluster_bitmap(ctx->fs,
 			_("in-use block map"), EXT2FS_BMAP64_RBTREE,
+		//	_("in-use block map"), EXT2FS_BMAP64_BITARRAY,
 			"block_found_map", &ctx->block_found_map);
 	if (pctx.errcode) {
 		pctx.num = 1;
@@ -1788,6 +1819,7 @@ static errcode_t e2fsck_pass1_prepare(e2fsck_t ctx)
 	}
 	pctx.errcode = e2fsck_allocate_block_bitmap(ctx->fs,
 			_("metadata block map"), EXT2FS_BMAP64_RBTREE,
+		//	_("metadata block map"), EXT2FS_BMAP64_BITARRAY,
 			"block_metadata_map", &ctx->block_metadata_map);
 	if (pctx.errcode) {
 		pctx.num = 1;
@@ -1808,6 +1840,7 @@ static errcode_t e2fsck_pass1_prepare(e2fsck_t ctx)
 	pctx.errcode = e2fsck_allocate_block_bitmap(ctx->fs,
 			_("multiply claimed block map"),
 			EXT2FS_BMAP64_RBTREE, "block_dup_map",
+			//EXT2FS_BMAP64_BITARRAY, "block_dup_map",
 			&ctx->block_dup_map);
 	if (pctx.errcode) {
 		pctx.num = 3;
@@ -1862,6 +1895,7 @@ static errcode_t e2fsck_pass1_prepare(e2fsck_t ctx)
             ctx->pipeline_thread_pool_count = ctx->pfs_num_pipeline_threads;
         }
     }
+    ctx->icount_time = 0;
 #endif
 
 	return 0;
@@ -1976,6 +2010,13 @@ static int precreated_object(struct ext2_inode *inode)
 	return 0;
 }
 
+static float timeval_subtract(struct timeval *tv1,
+				       struct timeval *tv2)
+{
+	return ((tv1->tv_sec - tv2->tv_sec) +
+		((float) (tv1->tv_usec - tv2->tv_usec)) / 1000000);
+}
+
 void e2fsck_pass1_run(e2fsck_t ctx)
 {
 	ext2_filsys fs = ctx->fs;
@@ -2008,6 +2049,9 @@ void e2fsck_pass1_run(e2fsck_t ctx)
 	ext2_ino_t	ino_scanned = 0;
     unsigned long long pipeline_start = 0;
     unsigned long long pipeline_count = 0;
+    struct timeval start,end;
+    float read_time = 0.0 ;
+    int flag;
 
 
 	init_resource_track(&rtrack, ctx->fs->io);
@@ -2032,9 +2076,13 @@ void e2fsck_pass1_run(e2fsck_t ctx)
 	/*
 	 * Allocate bitmaps structures
 	 */
+   // display_mallinfo();
+
+    //flag = ctx->use_fullmap ? EXT2FS_BMAP64_BITARRAY : EXT2FS_BMAP64_RBTREE;
+    flag = EXT2FS_BMAP64_RBTREE;
+
 	pctx.errcode = e2fsck_allocate_inode_bitmap(fs, _("in-use inode map"),
-						    EXT2FS_BMAP64_RBTREE,
-						    "inode_used_map",
+                            flag, "inode_used_map",
 						    &ctx->inode_used_map);
 	if (pctx.errcode) {
 		pctx.num = 1;
@@ -2044,8 +2092,9 @@ void e2fsck_pass1_run(e2fsck_t ctx)
 	}
 	pctx.errcode = e2fsck_allocate_inode_bitmap(fs,
 			_("directory inode map"),
-			ctx->global_ctx ? EXT2FS_BMAP64_RBTREE :
-			EXT2FS_BMAP64_AUTODIR,
+	//		ctx->global_ctx ? EXT2FS_BMAP64_RBTREE :
+	//		EXT2FS_BMAP64_AUTODIR,
+            flag,
 			"inode_dir_map", &ctx->inode_dir_map);
 	if (pctx.errcode) {
 		pctx.num = 2;
@@ -2054,7 +2103,8 @@ void e2fsck_pass1_run(e2fsck_t ctx)
 		return;
 	}
 	pctx.errcode = e2fsck_allocate_inode_bitmap(fs,
-			_("regular file inode map"), EXT2FS_BMAP64_RBTREE,
+			//_("regular file inode map"), EXT2FS_BMAP64_RBTREE,
+			_("regular file inode map"), flag,
 			"inode_reg_map", &ctx->inode_reg_map);
 	if (pctx.errcode) {
 		pctx.num = 6;
@@ -2076,7 +2126,9 @@ void e2fsck_pass1_run(e2fsck_t ctx)
 			return;
 		}
 	}
-	pctx.errcode = e2fsck_setup_icount(ctx, "inode_link_info", 0, NULL,
+               //TODO, forpipe -> 0 
+	pctx.errcode = e2fsck_setup_icount(ctx, "inode_link_info", EXT2_ICOUNT_OPT_FORPIPE, NULL,
+	//pctx.errcode = e2fsck_setup_icount(ctx, "inode_link_info", 0, NULL,
 					   &ctx->inode_link_info);
 	if (pctx.errcode) {
 		fix_problem(ctx, PR_1_ALLOCATE_ICOUNT, &pctx);
@@ -2205,8 +2257,13 @@ void e2fsck_pass1_run(e2fsck_t ctx)
 				fatal_error(ctx, 0);
 		}
 		old_op = ehandler_operation(eop_next_inode);
+
+        gettimeofday(&start,0);
 		pctx.errcode = ext2fs_get_next_inode_full(scan, &ino,
 							  inode, inode_size);
+        gettimeofday(&end,0);
+        read_time += timeval_subtract(&end,&start);
+
 		if (ino > ino_threshold)
 			pass1_readahead(ctx, &ra_group, &ino_threshold);
 		ehandler_operation(old_op);
@@ -2961,14 +3018,14 @@ void e2fsck_pass1_run(e2fsck_t ctx)
 		 */
 
         if (ctx->pfs_num_pipeline_threads || ctx->options & E2F_OPT_MULTITHREAD){
-		    if(!(ino_scanned % 20000)){
-                pipeline_count = ext2fs_dblist_count2(ctx->fs->dblist); 
-                if(pipeline_count > pipeline_start){
+            pipeline_count = ext2fs_dblist_count2(ctx->fs->dblist); 
+		    //if(!(ino_scanned % 25000)){
+                if(pipeline_count > pipeline_start + 1000){
                     e2fsck_pipeline_threads_start(ctx, ctx->fs->dblist,
                             pipeline_start, pipeline_count-pipeline_start);
                     pipeline_start = pipeline_count; 
                 }
-            }
+           // }
         }
 #endif
 
@@ -3042,6 +3099,10 @@ endit:
 	 */
 	ctx->lost_and_found = 0;
 
+    gettimeofday(&end,0);
+    printf("\n");
+    log_out(ctx, _("[Exp] Runtime for Pass 1 : %5.2f\n"),timeval_subtract(&end,&rtrack.time_start)); 
+    log_out(ctx,_("[Exp] Runtime for reading inode table time : %5.2f\n"),read_time);
 	if ((ctx->flags & E2F_FLAG_SIGNAL_MASK) == 0)
 		print_resource_track(ctx, _("Pass 1"), &rtrack, ctx->fs->io);
 	else
@@ -3350,10 +3411,11 @@ static errcode_t e2fsck_pass1_thread_prepare(e2fsck_t global_ctx, e2fsck_t *thre
 	thread_context->casefolded_dirs = NULL;
 	thread_context->expand_eisize_map = NULL;
 	thread_context->inode_badness = NULL;
-    thread_context->inode_count = NULL;
+    //thread_context->inode_count = NULL;
 
 	retval = e2fsck_allocate_block_bitmap(global_ctx->fs,
 				_("in-use block map"), EXT2FS_BMAP64_RBTREE,
+				//_("in-use block map"), EXT2FS_BMAP64_BITARRAY,
 				"block_found_map", &thread_context->block_found_map);
 	if (retval)
 		goto out_context;
@@ -3481,10 +3543,10 @@ static errcode_t e2fsck_pass1_merge_icounts(e2fsck_t global_ctx, e2fsck_t thread
 {
 	errcode_t ret;
 
-	ret = e2fsck_pass1_merge_icount(&global_ctx->inode_count,
-					&thread_ctx->inode_count);
-	if (ret)
-		return ret;
+	//ret = e2fsck_pass1_merge_icount(&global_ctx->inode_count,
+//					&thread_ctx->inode_count);
+	//if (ret)
+//		return ret;
 	ret = e2fsck_pass1_merge_icount(&global_ctx->inode_link_info,
 					&thread_ctx->inode_link_info);
 	if (ret)
@@ -3729,6 +3791,7 @@ static errcode_t e2fsck_pass1_merge_context(e2fsck_t global_ctx,
 		com_err(global_ctx->program_name, 0, _("while merging fs\n"));
 		return retval;
 	}
+
 	retval = e2fsck_pass1_merge_icounts(global_ctx, thread_ctx);
 	if (retval) {
 		com_err(global_ctx->program_name, 0,
@@ -3845,6 +3908,7 @@ static int e2fsck_pass1_thread_join(e2fsck_t global_ctx, e2fsck_t thread_ctx)
 	 */
 	thread_ctx->block_metadata_map = NULL;
 	thread_ctx->block_dup_map = NULL;
+    thread_ctx->inode_count = NULL;
 	e2fsck_reset_context(thread_ctx);
 	ext2fs_free_mem(&thread_ctx);
 
@@ -3889,12 +3953,6 @@ static int e2fsck_pass1_threads_join(e2fsck_t global_ctx)
 	return ret;
 }
 
-static float timeval_subtract(struct timeval *tv1,
-				       struct timeval *tv2)
-{
-	return ((tv1->tv_sec - tv2->tv_sec) +
-		((float) (tv1->tv_usec - tv2->tv_usec)) / 1000000);
-}
 
 static int e2fsck_pass1_threadpool_join(e2fsck_t global_ctx)
 {
@@ -3908,14 +3966,30 @@ static int e2fsck_pass1_threadpool_join(e2fsck_t global_ctx)
 	int i;
 
     thpool_wait(global_ctx->thread_pool);
-    if(num_pipeline_threads){
+
+    if( num_pipeline_threads > 0 ){
+	    for (i = 0; i < num_threads; i++) {
+            borrow_threads(global_ctx->thread_pool, global_ctx->pipeline_thread_pool,1);
+            //printf("Borrow thread to pipeline\n");
+        }
+
         gettimeofday(&start,0);
+
         thpool_wait(global_ctx->pipeline_thread_pool);
+
         gettimeofday(&end,0);
-        printf("wait time for pipe thread  : %5.2f \n",timeval_subtract(&end,&start));
+        printf("[Exp] Time for waiting pipeline threads done : %5.2f\n",timeval_subtract(&end,&start));
+	    for (i = 0; i < num_threads; i++) {
+            release_borrowed_threads(global_ctx->pipeline_thread_pool, 1);
+            //printf("Release thread from pipeline\n");
+        }
+        
     }
 	/* merge invalid bitmaps will recalculate it */
 	global_ctx->invalid_bitmaps = 0;
+
+    gettimeofday(&start,0);
+
 	for (i = 0; i < num_threads; i++) {
 		pinfo = &infos[i];
 
@@ -3930,6 +4004,8 @@ static int e2fsck_pass1_threadpool_join(e2fsck_t global_ctx)
 				ret = rc;
 		}
 	}
+    gettimeofday(&end,0);
+    printf("[Exp] Runtime for merging data threads : %5.2f\n",timeval_subtract(&end,&start));
 
 	free(infos);
 	global_ctx->infos = NULL;
@@ -3972,12 +4048,13 @@ static void *e2fsck_pass1_thread(void *arg)
 	e2fsck_pass1_run(thread_ctx);
 
 out:
-	if (thread_ctx->options & E2F_OPT_MULTITHREAD)
+/*	if (thread_ctx->options & E2F_OPT_MULTITHREAD)
 		log_out(thread_ctx,
 			_("Scanned group range [%u, %u), inodes %u\n"),
 			thread_ctx->thread_info.et_group_start,
 			thread_ctx->thread_info.et_group_end,
 			thread_ctx->thread_info.et_inode_number);
+            */
 
 #ifdef DEBUG_THREADS
 	pthread_mutex_lock(&thread_debug->etd_mutex);
@@ -4124,7 +4201,9 @@ static int e2fsck_pipeline_threadpool_start(e2fsck_t global_ctx)
     struct e2fsck_pipeline_context * pipeline_ctx;
     int num_pipeline_threads = global_ctx->pfs_num_pipeline_threads;
     int num_dynamic_threads = global_ctx->pfs_num_dynamic_threads;
+    int num_threads = global_ctx->pfs_num_threads;
 	ext2_filsys		pipethread_fs;
+    int flag;
 
 #ifdef DEBUG_THREADS
 	struct e2fsck_thread_debug	 thread_debug =
@@ -4133,7 +4212,8 @@ static int e2fsck_pipeline_threadpool_start(e2fsck_t global_ctx)
 	thread_debug.etd_finished_threads = 0;
 #endif
 
-	pipe_infos = calloc(num_pipeline_threads + num_dynamic_threads, sizeof(struct e2fsck_pipeline_info));
+	//pipe_infos = calloc(num_pipeline_threads + num_dynamic_threads, sizeof(struct e2fsck_pipeline_info));
+	pipe_infos = calloc(num_pipeline_threads + num_threads + num_dynamic_threads, sizeof(struct e2fsck_pipeline_info));
 	if (pipe_infos == NULL) {
 		retval = -ENOMEM;
 		com_err(global_ctx->program_name, retval,
@@ -4144,16 +4224,20 @@ static int e2fsck_pipeline_threadpool_start(e2fsck_t global_ctx)
 
     ext2fs_init_dclist(global_ctx->fs, &global_ctx->fs->dclist);
 
+    if(global_ctx->use_fullmap){
+        flag = EXT2_ICOUNT_OPT_FORPIPE;
+    }else{
+        flag = EXT2_ICOUNT_OPT_RBTREE2;
+    }
     retval = e2fsck_setup_icount(global_ctx, "inode_count",
-                EXT2_ICOUNT_OPT_INCREMENT,
-                NULL, &global_ctx->inode_count);
+                        flag, NULL, &global_ctx->inode_count);
     if (retval) {
         com_err(global_ctx->program_name, retval,
             _("while preparing pipeline thread\n"));
 		return retval;
     }
 
-	for (i = 0; i < num_pipeline_threads + num_dynamic_threads; i++) {
+	for (i = 0; i < num_pipeline_threads + num_threads + num_dynamic_threads; i++) {
 		tmp_pinfo = &pipe_infos[i];
 		tmp_pinfo->epi_thread_index = i;
 #ifdef DEBUG_THREADS
@@ -4180,12 +4264,20 @@ static int e2fsck_pipeline_threadpool_start(e2fsck_t global_ctx)
         }
         pipethread_fs->priv_data = tmp_pinfo->epi_pipeline_ctx;
         
+        
         tmp_pinfo->epi_pipeline_ctx->fs = pipethread_fs;
+        
 
         if(i < num_pipeline_threads){
             tmp_pinfo->epi_started = 1;
             tmp_pinfo->epi_thread_id = global_ctx->pipeline_thread_pool->threads[i]->pthread;
-        }else{
+        }
+        else if(i >= num_pipeline_threads && i < num_pipeline_threads + num_threads){
+            tmp_pinfo->epi_started = 1;
+//            tmp_pinfo->epi_thread_id = global_ctx->pipeline_thread_pool->threads[i-num_pipeline_threads]->pthread;
+
+        }
+        else{
             tmp_pinfo->epi_started = 0;
             tmp_pinfo->epi_thread_id = global_ctx->idle_thread_pool->threads[i-num_pipeline_threads]->pthread;
         }
@@ -4194,15 +4286,26 @@ static int e2fsck_pipeline_threadpool_start(e2fsck_t global_ctx)
         tmp_pinfo->epi_pipeline_ctx->dx_dir_info_count = 0;
         tmp_pinfo->epi_pipeline_ctx->dx_dir_info_size = 0;
         tmp_pinfo->epi_pipeline_ctx->dx_dir_info = NULL;
+        tmp_pinfo->epi_pipeline_ctx->runtime = 0;
+        tmp_pinfo->epi_pipeline_ctx->link2 = 0;
+        tmp_pinfo->epi_pipeline_ctx->locktime = 0;
+        tmp_pinfo->epi_pipeline_ctx->read_dir_time = 0;
+        tmp_pinfo->epi_pipeline_ctx->icount_time = 0;
+        tmp_pinfo->epi_pipeline_ctx->icount= 0;
+        tmp_pinfo->epi_pipeline_ctx->checked_db_count= 0;
 
-        retval = e2fsck_setup_icount(global_ctx, "inode_count",
-                    EXT2_ICOUNT_OPT_INCREMENT,
-                    NULL, &tmp_pinfo->epi_pipeline_ctx->inode_count);
+        
+        if(flag != EXT2_ICOUNT_OPT_FORPIPE){
+           retval = e2fsck_setup_icount(global_ctx, "inode_count",
+                       flag, NULL, &tmp_pinfo->epi_pipeline_ctx->inode_count);
+        }
+                    
         if (retval) {
 			com_err(global_ctx->program_name, retval,
 				_("while preparing pipeline thread\n"));
 			break;
 	    }
+        
 
         tmp_pinfo->epi_pipeline_ctx->buf = (char *) e2fsck_allocate_memory(global_ctx, 
                 2*global_ctx->fs->blocksize, "directory scan buffer");
@@ -4270,6 +4373,11 @@ static int e2fsck_pass1_threadpool_start(e2fsck_t global_ctx)
 		tmp_pinfo->eti_thread_ctx = thread_ctx;
         tmp_pinfo->eti_thread_id = global_ctx->thread_pool->threads[i]->pthread;
 
+        if(num_pipeline_threads > 0){
+            global_ctx->pipe_infos[i + num_pipeline_threads].epi_thread_id = tmp_pinfo->eti_thread_id;
+
+        }
+
         thpool_add_work(global_ctx->thread_pool,(void*)e2fsck_pass1_thread,(void*)tmp_pinfo);
 		tmp_pinfo->eti_started = 1;
 	}
@@ -4316,6 +4424,19 @@ void e2fsck_pass1(e2fsck_t ctx)
 	errcode_t retval;
 	int need_single = 1;
 
+    ext2_ino_t ratio_dirs, ratio_used;
+    ext2fs_get_ratio_dirs(ctx->fs, &ratio_dirs);
+    ext2fs_get_ratio_used(ctx->fs, &ratio_used);
+    printf("[Exp] dir ratio : %d, used ratio : %d\n", ratio_dirs,ratio_used);
+
+    //if(ctx->pfs_num_pipeline_threads && !ctx->use_fullmap)
+    if(!ctx->use_fullmap)
+        ctx->use_fullmap =  ratio_used < 50 && ratio_dirs * ratio_used <= 200 ? false : true;
+    //else ctx->use_fullmap = true;
+    //ctx->use_fullmap = false;
+
+    printf("[Exp] use_fullmap ? : %d\n", ctx->use_fullmap);
+
 	retval = e2fsck_pass1_prepare(ctx);
 	if (retval)
 		return;
@@ -4335,7 +4456,7 @@ void e2fsck_pass1(e2fsck_t ctx)
 #endif
 	if (need_single)
 		e2fsck_pass1_run(ctx);
-	e2fsck_pass1_post(ctx);
+    e2fsck_pass1_post(ctx);
 }
 
 #undef FINISH_INODE_LOOP

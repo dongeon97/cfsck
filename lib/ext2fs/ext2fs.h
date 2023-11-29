@@ -107,6 +107,7 @@ typedef __u32 __bitwise		ext2_dirhash_t;
 #endif
 
 #include "hashmap.h"
+#include "tdb.h"
 
 /*
  * Portability help for Microsoft Visual C++
@@ -355,6 +356,7 @@ struct struct_ext2_filsys {
 #define EXT2FS_BMAP64_BITARRAY	1
 #define EXT2FS_BMAP64_RBTREE	2
 #define EXT2FS_BMAP64_AUTODIR	3
+#define EXT2FS_BMAP64_RBTREE2	4
 
 /*
  * Return flags for the block iterator functions
@@ -594,6 +596,32 @@ typedef struct ext2_struct_inode_scan *ext2_inode_scan;
  */
 #define EXT2_ICOUNT_OPT_INCREMENT	0x01
 #define EXT2_ICOUNT_OPT_FULLMAP		0x02
+#define EXT2_ICOUNT_OPT_FORPIPE		0x04
+#define EXT2_ICOUNT_OPT_RBTREE2		0x08
+
+struct ext2_icount_el {
+	ext2_ino_t	ino;
+	__u32		count;
+};
+
+struct ext2_icount {
+	errcode_t		magic;
+	ext2fs_inode_bitmap	single;
+	ext2fs_inode_bitmap	multiple;
+	ext2fs_inode_bitmap	rbtree;
+	ext2_ino_t		count;
+	ext2_ino_t		size;
+	ext2_ino_t		num_inodes;
+	ext2_ino_t		cursor;
+	struct ext2_icount_el	*list;
+	struct ext2_icount_el	*last_lookup;
+    pthread_mutex_t icount_lock;
+#ifdef CONFIG_TDB
+	char			*tdb_fn;
+	TDB_CONTEXT		*tdb;
+#endif
+	__u16			*fullmap;
+};
 
 typedef struct ext2_icount *ext2_icount_t;
 
@@ -889,6 +917,10 @@ extern void ext2fs_free_inode_bitmap(ext2fs_inode_bitmap bitmap);
 extern errcode_t ext2fs_copy_bitmap(ext2fs_generic_bitmap src,
 				    ext2fs_generic_bitmap *dest);
 errcode_t ext2fs_merge_bitmap(ext2fs_generic_bitmap src,
+			      ext2fs_generic_bitmap dest,
+			      ext2fs_generic_bitmap dup,
+			      ext2fs_generic_bitmap dup_allowed);
+errcode_t ext2fs_count_bitmap(ext2fs_generic_bitmap src,
 			      ext2fs_generic_bitmap dest,
 			      ext2fs_generic_bitmap dup,
 			      ext2fs_generic_bitmap dup_allowed);
@@ -1547,6 +1579,10 @@ errcode_t ext2fs_merge_generic_bmap(ext2fs_generic_bitmap gen_src,
                                     ext2fs_generic_bitmap gen_dest,
 				    ext2fs_generic_bitmap gen_dup,
 				    ext2fs_generic_bitmap dup_allowed);
+errcode_t ext2fs_count_generic_bmap(ext2fs_generic_bitmap gen_src,
+                                    ext2fs_generic_bitmap gen_dest,
+				    ext2fs_generic_bitmap gen_dup,
+				    ext2fs_generic_bitmap dup_allowed);
 errcode_t ext2fs_find_dup_generic_bmap(ext2fs_generic_bitmap gen_src,
                                     ext2fs_generic_bitmap gen_dest,
 				    ext2fs_generic_bitmap gen_dup);
@@ -1566,6 +1602,10 @@ errcode_t ext2fs_count_used_clusters(ext2_filsys fs, blk64_t start,
 
 /* get_num_dirs.c */
 extern errcode_t ext2fs_get_num_dirs(ext2_filsys fs, ext2_ino_t *ret_num_dirs);
+
+extern errcode_t ext2fs_get_ratio_dirs(ext2_filsys fs, ext2_ino_t *ret_ratio_dirs);
+
+extern errcode_t ext2fs_get_ratio_used(ext2_filsys fs, ext2_ino_t *ret_ratio_ino);
 
 /* getsize.c */
 extern errcode_t ext2fs_get_device_size(const char *file, int blocksize,

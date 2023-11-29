@@ -162,6 +162,24 @@ static errcode_t ba_resize_bmap(ext2fs_generic_bitmap_64 bmap,
 
 }
 
+static errcode_t ba_merge_bmap(ext2fs_generic_bitmap_64 src,
+			       ext2fs_generic_bitmap_64 dest,
+			       ext2fs_generic_bitmap_64 dup,
+			       ext2fs_generic_bitmap_64 dup_allowed)
+{
+	ext2fs_ba_private src_bp = (ext2fs_ba_private) src->private;
+	ext2fs_ba_private dest_bp = (ext2fs_ba_private) dest->private;
+	size_t size = (size_t) (((src->real_end - src->start) / 8) + 1);
+
+    for(int i= 0 ; i < size ; i++){
+        //printf("[%d] dest : 0x%x , src : 0x%x\n",i,dest_bp->bitarray[i], src_bp->bitarray[i]); 
+        dest_bp->bitarray[i] += src_bp->bitarray[i];
+    }
+
+    return 0;
+
+}
+
 static int ba_mark_bmap(ext2fs_generic_bitmap_64 bitmap, __u64 arg)
 {
 	ext2fs_ba_private bp = (ext2fs_ba_private) bitmap->private;
@@ -476,6 +494,7 @@ struct ext2_bitmap_ops ext2fs_blkmap64_bitarray = {
 	.new_bmap = ba_new_bmap,
 	.free_bmap = ba_free_bmap,
 	.copy_bmap = ba_copy_bmap,
+    .merge_bmap = ba_merge_bmap,
 	.resize_bmap = ba_resize_bmap,
 	.mark_bmap = ba_mark_bmap,
 	.unmark_bmap = ba_unmark_bmap,

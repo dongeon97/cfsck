@@ -69,6 +69,7 @@
 #endif
 #ifdef HAVE_PTHREAD
 #include <pthread.h>
+#include <sys/time.h>
 #endif
 
 #if defined(__linux__) && defined(_IO) && !defined(BLKROGET)
@@ -148,8 +149,9 @@ static inline void mutex_lock(struct unix_private_data *data, kind_t kind)
 #ifdef HAVE_PTHREAD
 	pthread_mutex_t *mtx = get_mutex(data,kind);
 
-	if (mtx)
-		pthread_mutex_lock(mtx);
+	if (mtx){
+        pthread_mutex_lock(mtx);
+    }
 #endif
 }
 
@@ -159,7 +161,7 @@ static inline void mutex_unlock(struct unix_private_data *data, kind_t kind)
 	pthread_mutex_t *mtx = get_mutex(data,kind);
 
 	if (mtx)
-		pthread_mutex_unlock(mtx);
+        pthread_mutex_unlock(mtx);
 #endif
 }
 

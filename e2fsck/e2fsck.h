@@ -336,6 +336,16 @@ struct e2fsck_pipeline_context {
     ext2_icount_t inode_count;
     int fs_links_count;
     int fs_total_count;
+
+    int icount;
+    int link2;
+    float runtime;
+    float locktime;
+    float read_dir_time;
+    float info_update_time; //for updating parent info time
+    float icount_time;
+    float check_time;
+    int checked_db_count;
 };
 #endif
 
@@ -585,9 +595,24 @@ struct e2fsck_struct {
 	struct e2fsck_pipeline_info	*pipe_infos;
     threadpool pipeline_thread_pool;
     int pipeline_thread_pool_count;
-	ext2_ino_t		pipeline_dx_dir_info_count;
-	ext2_ino_t		pipeline_dx_dir_info_size;
-	struct dx_dir_info	*pipeline_dx_dir_info;
+//	ext2_ino_t		pipeline_dx_dir_info_count;
+//	ext2_ino_t		pipeline_dx_dir_info_size;
+//	struct dx_dir_info	*pipeline_dx_dir_info;
+
+    bool use_fullmap;
+
+    float icount_time; //for updating icount increment time
+    float check_time; // for checking consistency time
+    float info_update_time; //for updating parent info time
+    float read_dir_time; // for reading dir block time
+    float post_time; //for checking after iterate time
+    float time1;
+    float time2;
+    float time3;
+    float time4;
+    float time5;
+    float time6;
+    float time7;
 
     /* for dynamic thread scheduler */
     threadpool idle_thread_pool;

@@ -19,6 +19,9 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <pthread.h>
+#include <sys/time.h>
+#include <malloc.h>
 
 #include "ext2_fs.h"
 #include "ext2fs.h"
@@ -43,27 +46,6 @@
  * particular inode is on the sorted list already.
  */
 
-struct ext2_icount_el {
-	ext2_ino_t	ino;
-	__u32		count;
-};
-
-struct ext2_icount {
-	errcode_t		magic;
-	ext2fs_inode_bitmap	single;
-	ext2fs_inode_bitmap	multiple;
-	ext2_ino_t		count;
-	ext2_ino_t		size;
-	ext2_ino_t		num_inodes;
-	ext2_ino_t		cursor;
-	struct ext2_icount_el	*list;
-	struct ext2_icount_el	*last_lookup;
-#ifdef CONFIG_TDB
-	char			*tdb_fn;
-	TDB_CONTEXT		*tdb;
-#endif
-	__u16			*fullmap;
-};
 
 /*
  * We now use a 32-bit counter field because it doesn't cost us
@@ -74,6 +56,35 @@ struct ext2_icount {
  */
 #define icount_16_xlate(x) (((x) > 65500) ? 65500 : (x))
 
+static void
+display_mallinfo(char * s)
+{
+    struct mallinfo mi;
+
+    mi = mallinfo();
+
+    printf("DISPLAY MEMORY USAGE in %s\n",s);
+    printf("Total non-mmapped bytes (arena):       %zu\n", mi.arena);
+    printf("# of free chunks (ordblks):            %zu\n", mi.ordblks);
+    printf("# of free fastbin blocks (smblks):     %zu\n", mi.smblks);
+    printf("# of mapped regions (hblks):           %zu\n", mi.hblks);
+    printf("Bytes in mapped regions (hblkhd):      %zu\n", mi.hblkhd);
+    printf("Max. total allocated space (usmblks):  %zu\n", mi.usmblks);
+    printf("Free bytes held in fastbins (fsmblks): %zu\n", mi.fsmblks);
+    printf("Total allocated space (uordblks):      %zu\n", mi.uordblks);
+    printf("Total free space (fordblks):           %zu\n", mi.fordblks);
+    printf("Topmost releasable block (keepcost):   %zu\n", mi.keepcost);
+    printf("\n");
+}
+
+extern int dup_found;
+static float timeval_subtract(struct timeval *tv1,
+				       struct timeval *tv2)
+{
+	return ((tv1->tv_sec - tv2->tv_sec) +
+		((float) (tv1->tv_usec - tv2->tv_usec)) / 1000000);
+}
+
 void ext2fs_free_icount(ext2_icount_t icount)
 {
 	if (!icount)
@@ -82,6 +93,8 @@ void ext2fs_free_icount(ext2_icount_t icount)
 	icount->magic = 0;
 	if (icount->list)
 		ext2fs_free_mem(&icount->list);
+	if (icount->rbtree)
+		ext2fs_free_inode_bitmap(icount->rbtree);
 	if (icount->single)
 		ext2fs_free_inode_bitmap(icount->single);
 	if (icount->multiple)
@@ -105,6 +118,7 @@ static errcode_t alloc_icount(ext2_filsys fs, int flags, ext2_icount_t *ret)
 {
 	ext2_icount_t	icount;
 	errcode_t	retval;
+    unsigned int save_type;
 
 	*ret = 0;
 
@@ -115,7 +129,30 @@ static errcode_t alloc_icount(ext2_filsys fs, int flags, ext2_icount_t *ret)
 	icount->magic = EXT2_ET_MAGIC_ICOUNT;
 	icount->num_inodes = fs->super->s_inodes_count;
 
-	if ((flags & EXT2_ICOUNT_OPT_FULLMAP) &&
+	if (flags & EXT2_ICOUNT_OPT_RBTREE2){
+        retval = ext2fs_allocate_inode_bitmap(fs, "icount", &icount->rbtree);
+
+        if (retval)
+            goto errout;
+
+        save_type = fs->default_bitmap_type;
+	    fs->default_bitmap_type = EXT2FS_BMAP64_RBTREE;
+        //e2fsck_set_bitmap_type(fs, EXT2FS_BMAP64_RBTREE, NULL,
+         //              &save_type);
+	   // fs->default_bitmap_type = EXT2FS_BMAP64_RBTREE;
+        retval = ext2fs_allocate_inode_bitmap(fs, "icount", &icount->single);
+	    fs->default_bitmap_type = save_type;
+
+        if (retval)
+            goto errout;
+
+        //icount->single = 0;
+        icount->multiple = 0;
+        *ret = icount;
+        return 0;
+    }
+
+	if ((flags & EXT2_ICOUNT_OPT_FORPIPE) || (flags & EXT2_ICOUNT_OPT_FULLMAP) &&
 	    (flags & EXT2_ICOUNT_OPT_INCREMENT)) {
 		unsigned sz = sizeof(*icount->fullmap) * icount->num_inodes;
 
@@ -276,7 +313,7 @@ errcode_t ext2fs_create_icount2(ext2_filsys fs, int flags, unsigned int size,
 	if (retval)
 		return retval;
 
-	if (icount->fullmap)
+	if (icount->fullmap || icount->rbtree)
 		goto successout;
 
 	if (size) {
@@ -291,7 +328,7 @@ errcode_t ext2fs_create_icount2(ext2_filsys fs, int flags, unsigned int size,
 		if (retval)
 			goto errout;
 		icount->size += fs->super->s_inodes_count / 50;
-		if (fs->fs_num_threads)
+		if (fs->fs_num_threads && !(flags & EXT2_ICOUNT_OPT_FORPIPE))
 			icount->size /= fs->fs_num_threads;
 	}
 
@@ -322,6 +359,7 @@ errcode_t ext2fs_create_icount2(ext2_filsys fs, int flags, unsigned int size,
 
 successout:
 	*ret = icount;
+    pthread_mutex_init(&icount->icount_lock,NULL);
 	return 0;
 
 errout:
@@ -347,6 +385,8 @@ static struct ext2_icount_el *insert_icount_el(ext2_icount_t icount,
 	errcode_t		retval;
 	ext2_ino_t		new_size = 0;
 	int			num;
+ //   struct timeval start,end;
+  //  gettimeofday(&start,0);
 
 	if (icount->last_lookup && icount->last_lookup->ino == ino)
 		return icount->last_lookup;
@@ -383,6 +423,8 @@ static struct ext2_icount_el *insert_icount_el(ext2_icount_t icount,
 	el->count = 0;
 	el->ino = ino;
 	icount->last_lookup = el;
+ //   gettimeofday(&end,0);
+  //  printf("%d inode insert el for %0.6f\n",ino,timeval_subtract(&end,&start));
 	return el;
 }
 
@@ -394,6 +436,8 @@ static struct ext2_icount_el *insert_icount_el(ext2_icount_t icount,
 static struct ext2_icount_el *get_icount_el(ext2_icount_t icount,
 					    ext2_ino_t ino, int create)
 {
+ //   struct timeval start,end;
+   // gettimeofday(&start,0);
 	int	low, high, mid;
 
 	if (!icount || !icount->list)
@@ -426,6 +470,8 @@ static struct ext2_icount_el *get_icount_el(ext2_icount_t icount,
 		else
 			low = mid+1;
 	}
+ //   gettimeofday(&end,0);
+  //  printf("%d inode get el for %0.6f\n",ino,timeval_subtract(&end,&start));
 	/*
 	 * If we need to create a new entry, it should be right at
 	 * low (where high will be left at low-1).
@@ -464,10 +510,13 @@ static errcode_t set_inode_count(ext2_icount_t icount, ext2_ino_t ino,
 		return 0;
 	}
 
+ //   struct timeval start,end;
+  //  gettimeofday(&start,0);
 	el = get_icount_el(icount, ino, 1);
 	if (!el)
 		return EXT2_ET_NO_MEMORY;
-
+   // gettimeofday(&end,0);
+   // printf("%d inode get el for %0.6f\n",ino,timeval_subtract(&end,&start));
 	el->count = count;
 	return 0;
 }
@@ -552,10 +601,23 @@ errcode_t ext2fs_icount_validate(ext2_icount_t icount, FILE *out)
 errcode_t ext2fs_icount_fetch(ext2_icount_t icount, ext2_ino_t ino, __u16 *ret)
 {
 	__u32	val;
+    __u32   single = 0;
 	EXT2_CHECK_MAGIC(icount, EXT2_ET_MAGIC_ICOUNT);
 
 	if (!ino || (ino > icount->num_inodes))
 		return EXT2_ET_INVALID_ARGUMENT;
+
+    if(icount->rbtree){
+        if (ext2fs_test_inode_bitmap2(icount->single, ino)){ 
+            single = 1;
+            //*ret = 1;
+            //return 0;
+        }
+        val = ext2fs_get_inode_bitmap_count2(icount->rbtree, ino);
+	    *ret = single + icount_16_xlate(val);
+     //   printf("(%d,%d) fetch // single : %d, val : %d\n",ino, *ret,single, val);
+        return 0;
+    }
 
 	if (!icount->fullmap) {
 		if (ext2fs_test_inode_bitmap2(icount->single, ino)) {
@@ -577,13 +639,30 @@ errcode_t ext2fs_icount_increment(ext2_icount_t icount, ext2_ino_t ino,
 				  __u16 *ret)
 {
 	__u32			curr_value;
+    struct timeval start,end;
+ //   gettimeofday(&start,0);
 
 	EXT2_CHECK_MAGIC(icount, EXT2_ET_MAGIC_ICOUNT);
 
 	if (!ino || (ino > icount->num_inodes))
 		return EXT2_ET_INVALID_ARGUMENT;
 
-	if (icount->fullmap) {
+    if(icount->rbtree){
+        if (ext2fs_test_inode_bitmap2(icount->single, ino)){ 
+            // icount of ino  = 1, then insert {ino,ref_count = 2} to rbtree
+            curr_value = 2;
+            ext2fs_mark_inode_bitmap2(icount->rbtree, ino);
+		    ext2fs_unmark_inode_bitmap2(icount->single, ino);
+        }else if(ext2fs_test_inode_bitmap2(icount->rbtree, ino)){
+            curr_value = icount_16_xlate(ext2fs_get_inode_bitmap_count2(icount->rbtree, ino) + 1);
+            ext2fs_increment_inode_bitmap2(icount->rbtree, ino, curr_value);
+
+        }else{ // icount of ino = 0 
+			ext2fs_mark_inode_bitmap2(icount->single, ino);
+            curr_value = 1;
+        }
+
+    }else if (icount->fullmap) {
 		curr_value = icount_16_xlate(icount->fullmap[ino] + 1);
 		icount->fullmap[ino] = curr_value;
 	} else if (ext2fs_test_inode_bitmap2(icount->single, ino)) {
@@ -591,6 +670,7 @@ errcode_t ext2fs_icount_increment(ext2_icount_t icount, ext2_ino_t ino,
 		 * If the existing count is 1, then we know there is
 		 * no entry in the list.
 		 */
+  //      printf("%d inode attempts to incr to 2\n",ino);
 		if (set_inode_count(icount, ino, 2))
 			return EXT2_ET_NO_MEMORY;
 		curr_value = 2;
@@ -604,6 +684,7 @@ errcode_t ext2fs_icount_increment(ext2_icount_t icount, ext2_ino_t ino,
 		if (ext2fs_test_inode_bitmap2(icount->multiple, ino)) {
 			get_inode_count(icount, ino, &curr_value);
 			curr_value++;
+   //         printf("%d inode attempts to incr to %d\n",ino,curr_value);
 			if (set_inode_count(icount, ino, curr_value))
 				return EXT2_ET_NO_MEMORY;
 		} else {
@@ -630,6 +711,9 @@ errcode_t ext2fs_icount_increment(ext2_icount_t icount, ext2_ino_t ino,
 		ext2fs_mark_inode_bitmap2(icount->multiple, ino);
 	if (ret)
 		*ret = icount_16_xlate(curr_value);
+    //gettimeofday(&end,0);
+    //printf("%d inode increment done for %0.6f\n",ino,timeval_subtract(&end,&start));
+    //printf("inode_count size : %d, count : %d\n",icount->size, icount->count);
 	return 0;
 }
 
@@ -642,6 +726,31 @@ errcode_t ext2fs_icount_decrement(ext2_icount_t icount, ext2_ino_t ino,
 		return EXT2_ET_INVALID_ARGUMENT;
 
 	EXT2_CHECK_MAGIC(icount, EXT2_ET_MAGIC_ICOUNT);
+
+    if(icount->rbtree){
+        if (ext2fs_test_inode_bitmap2(icount->single, ino)){ 
+            // icount of ino  = 1
+		    ext2fs_unmark_inode_bitmap2(icount->single, ino);
+            curr_value = 0;
+        }else if(ext2fs_test_inode_bitmap2(icount->rbtree, ino)){
+
+            curr_value = icount_16_xlate(ext2fs_get_inode_bitmap_count2(icount->rbtree, ino) - 1);
+            if(curr_value == 1){
+		        ext2fs_unmark_inode_bitmap2(icount->rbtree, ino);
+		        ext2fs_mark_inode_bitmap2(icount->single, ino);
+
+            }else{
+                ext2fs_increment_inode_bitmap2(icount->rbtree, ino, curr_value);
+            }
+
+        }else{
+			return EXT2_ET_INVALID_ARGUMENT;
+        }
+
+		if (ret)
+			*ret = icount_16_xlate(curr_value);
+        return 0;
+    }
 
 	if (icount->fullmap) {
 		if (!icount->fullmap[ino])
@@ -725,8 +834,11 @@ errcode_t ext2fs_icount_store(ext2_icount_t icount, ext2_ino_t ino,
 
 errcode_t ext2fs_icount_merge_full_map(ext2_icount_t src, ext2_icount_t dest)
 {
-	/* TODO: add the support for full map */
-	return EOPNOTSUPP;
+    for(int i = 0 ; i <= src->num_inodes;i++){
+        dest->fullmap[i] += src->fullmap[i];
+    }
+
+    return 0;
 }
 
 errcode_t ext2fs_pipeline_icount_merge_el(ext2_icount_t src, ext2_icount_t dest)
@@ -852,12 +964,6 @@ errcode_t ext2fs_icount_merge_el(ext2_icount_t src, ext2_icount_t dest)
 	return 0;
 }
 
-static float timeval_subtract(struct timeval *tv1,
-				       struct timeval *tv2)
-{
-	return ((tv1->tv_sec - tv2->tv_sec) +
-		((float) (tv1->tv_usec - tv2->tv_usec)) / 1000000);
-}
 
 errcode_t ext2fs_pipeline_icount_merge(ext2_icount_t src, ext2_icount_t dest)
 {
@@ -950,28 +1056,74 @@ errcode_t ext2fs_pipeline_icount_merge(ext2_icount_t src, ext2_icount_t dest)
    // printf("fetch time for pipe thread  : %5.2f \n",t);
 
 
-
+    gettimeofday(&start,0);
 	retval = ext2fs_find_dup_bitmap(src->single, dest->single, dup_ss);
+    gettimeofday(&end,0);
+    printf("single - single dup find time  : %5.2f \n",timeval_subtract(&end,&start));
+    gettimeofday(&start,0);
 	retval = ext2fs_find_dup_bitmap(src->single, dest->multiple, dup_sm);
+    gettimeofday(&end,0);
+    printf("single - multiple dup find time  : %5.2f \n",timeval_subtract(&end,&start));
+    gettimeofday(&start,0);
 	retval = ext2fs_find_dup_bitmap(src->multiple, dest->single, dup_ms);
+    gettimeofday(&end,0);
+    printf("multiple - single dup find time  : %5.2f \n",timeval_subtract(&end,&start));
 
+    float incrtime, unmarktime;
+    float sstime, smtime, mmtime;
+    __u32 curr_value;
+    struct timeval ss_start,ss_end;
+    struct timeval sm_start,sm_end;
+
+
+    gettimeofday(&fstart,0);
     for( ino = 1 ; ino < src->num_inodes; ino++){
         if(ext2fs_test_inode_bitmap2(dup_ss, ino)){
-                ext2fs_icount_increment(dest,ino,NULL);
+                gettimeofday(&start,0);
+                set_inode_count(dest,ino,2);
+                //ext2fs_icount_increment(dest,ino,NULL);
+                gettimeofday(&end,0);
+                sstime += timeval_subtract(&end,&start);
+
+                gettimeofday(&start,0);
                 ext2fs_unmark_inode_bitmap2(src->single, ino);
+                ext2fs_unmark_inode_bitmap2(dest->single, ino);
+                ext2fs_mark_inode_bitmap2(dest->multiple, ino);
+                gettimeofday(&end,0);
+                unmarktime +=timeval_subtract(&end,&start);
                 links_count++;
         }
         if(ext2fs_test_inode_bitmap2(dup_sm, ino)) {
-                ext2fs_icount_increment(dest,ino,NULL);
+                gettimeofday(&start,0);
+                get_inode_count(dest,ino,&curr_value);
+                set_inode_count(dest,ino,curr_value+1);
+                //ext2fs_icount_increment(dest,ino,NULL);
+                gettimeofday(&end,0);
+                smtime += timeval_subtract(&end,&start);
+
+                gettimeofday(&start,0);
                 ext2fs_unmark_inode_bitmap2(src->single, ino);
+                gettimeofday(&end,0);
+                unmarktime +=timeval_subtract(&end,&start);
                 links_count++;
         }
         if(ext2fs_test_inode_bitmap2(dup_ms, ino)){         
+                gettimeofday(&start,0);
                 ext2fs_icount_increment(src,ino,NULL);
+                gettimeofday(&end,0);
+                incrtime +=timeval_subtract(&end,&start);
+
+                gettimeofday(&start,0);
                 ext2fs_unmark_inode_bitmap2(dest->single, ino);
+                gettimeofday(&end,0);
+                unmarktime +=timeval_subtract(&end,&start);
                 links_count++;
         }
     }
+    gettimeofday(&fend,0);
+    printf("modify icount time : %5.2f \n",timeval_subtract(&fend,&fstart));
+    printf("sstime : %5.2f, smtime: %5.2f, mm time : %5.2f, unmark time : %5.2f\n",sstime,smtime,incrtime,unmarktime);
+
 	if (src->fullmap)
 		return ext2fs_icount_merge_full_map(src, dest);
 
@@ -1001,6 +1153,8 @@ errcode_t ext2fs_pipeline_icount_merge(ext2_icount_t src, ext2_icount_t dest)
 errcode_t ext2fs_icount_merge(ext2_icount_t src, ext2_icount_t dest)
 {
 	errcode_t	retval;
+    ext2fs_inode_bitmap dup;
+    unsigned int save_type;
 
 	if (src->fullmap && !dest->fullmap)
 		return EINVAL;
@@ -1014,6 +1168,30 @@ errcode_t ext2fs_icount_merge(ext2_icount_t src, ext2_icount_t dest)
 	if (!src->multiple && dest->multiple)
 		return EINVAL;
 
+    if(src->rbtree && !dest->rbtree)
+        return EINVAL;
+
+    if(!src->rbtree && dest->rbtree)
+        return EINVAL;
+
+    if(src->rbtree){
+        save_type = src->single->fs->default_bitmap_type;
+	    src->single->fs->default_bitmap_type = EXT2FS_BMAP64_RBTREE;
+
+	    ext2fs_allocate_inode_bitmap(src->single->fs, NULL, &dup);
+
+	    src->single->fs->default_bitmap_type = save_type;
+
+        dup_found = 0;
+        ext2fs_count_bitmap(src->single, dest->rbtree,NULL,NULL);
+
+	    retval = ext2fs_find_dup_bitmap(src->single, dest->single, dup);
+
+        retval = ext2fs_merge_bitmap(src->rbtree, dest->rbtree, dup, dest->single);
+
+	    ext2fs_free_inode_bitmap(dup);
+        return retval;
+    }
 	if (src->fullmap)
 		return ext2fs_icount_merge_full_map(src, dest);
 

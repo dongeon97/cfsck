@@ -47,6 +47,7 @@ struct ext2_struct_dclist{
 	unsigned long long	size;
 	unsigned long long	count;
 	struct ext2_dc_entry *	list;
+    pthread_mutex_t lock;
 };
 
 

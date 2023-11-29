@@ -14,6 +14,7 @@
 
 #include "e2fsck.h"
 #include "problem.h"
+#include <malloc.h>
 
 /*
  * This function allocates an e2fsck context
@@ -250,6 +251,27 @@ static float timeval_subtract(struct timeval *tv1,
 		((float) (tv1->tv_usec - tv2->tv_usec)) / 1000000);
 }
 
+static void
+display_mallinfo(char * s)
+{
+    struct mallinfo mi;
+
+    mi = mallinfo();
+
+    printf("DISPLAY MEMORY USAGE in %s\n",s);
+    printf("Total non-mmapped bytes (arena):       %zu\n", mi.arena);
+    printf("# of free chunks (ordblks):            %zu\n", mi.ordblks);
+    printf("# of free fastbin blocks (smblks):     %zu\n", mi.smblks);
+    printf("# of mapped regions (hblks):           %zu\n", mi.hblks);
+    printf("Bytes in mapped regions (hblkhd):      %zu\n", mi.hblkhd);
+    printf("Max. total allocated space (usmblks):  %zu\n", mi.usmblks);
+    printf("Free bytes held in fastbins (fsmblks): %zu\n", mi.fsmblks);
+    printf("Total allocated space (uordblks):      %zu\n", mi.uordblks);
+    printf("Total free space (fordblks):           %zu\n", mi.fordblks);
+    printf("Topmost releasable block (keepcost):   %zu\n", mi.keepcost);
+    printf("\n");
+}
+
 /*
  * This function runs through the e2fsck passes and calls them all,
  * returning restart, abort, or cancel as necessary...
@@ -273,6 +295,7 @@ int e2fsck_run(e2fsck_t ctx)
 	}
 	ctx->flags |= E2F_FLAG_SETJMP_OK;
 #endif
+    //display_mallinfo(__func__);
 
 	for (i=0; (e2fsck_pass = e2fsck_passes[i]); i++) {
 		if (ctx->flags & E2F_FLAG_RUN_RETURN)
@@ -282,6 +305,7 @@ int e2fsck_run(e2fsck_t ctx)
 		gettimeofday(&time_start, 0);
 		e2fsck_pass(ctx);
 		gettimeofday(&time_end, 0);
+     //   display_mallinfo(__func__);
 		printf("time taken by %d: %5.2f\n", i,
 				timeval_subtract(&time_end, &time_start));
 		if (ctx->progress)
@@ -295,11 +319,14 @@ int e2fsck_run(e2fsck_t ctx)
         thpool_destroy(ctx->idle_thread_pool);
 
     }else{
-        if (ctx->pfs_num_threads > 1 || ctx->options & E2F_OPT_MULTITHREAD) {
-            thpool_destroy(ctx->thread_pool);
-        }
+       // int borrowed = ctx->pipeline_thread_pool->num_threads_alive - ctx->pfs_num_pipeline_threads;
         if (ctx->pfs_num_pipeline_threads > 1 || ctx->options & E2F_OPT_MULTITHREAD) {
+       //     ctx->pipeline_thread_pool->num_threads_alive -= borrowed;
             thpool_destroy(ctx->pipeline_thread_pool);
+        }
+        if (ctx->pfs_num_threads > 1 || ctx->options & E2F_OPT_MULTITHREAD) {
+        //    ctx->thread_pool->num_threads_alive += borrowed;
+            thpool_destroy(ctx->thread_pool);
         }
     }
 	if (ctx->flags & E2F_FLAG_RUN_RETURN)

@@ -55,6 +55,15 @@ errcode_t ext2fs_merge_bitmap(ext2fs_generic_bitmap src,
 					 dup_allowed);
 }
 
+errcode_t ext2fs_count_bitmap(ext2fs_generic_bitmap src,
+			      ext2fs_generic_bitmap dest,
+			      ext2fs_generic_bitmap dup,
+			      ext2fs_generic_bitmap dup_allowed)
+{
+	return ext2fs_count_generic_bmap(src, dest, dup,
+					 dup_allowed);
+}
+
 errcode_t ext2fs_find_dup_bitmap(ext2fs_generic_bitmap src,
 			      ext2fs_generic_bitmap dest,
 			      ext2fs_generic_bitmap dup)

@@ -16,6 +16,7 @@
 #endif
 #include <string.h>
 #include <time.h>
+#include <sys/time.h>
 
 #include "ext2_fs.h"
 #include "ext2fsP.h"
@@ -245,6 +246,12 @@ void ext2fs_dblist_sort2(ext2_dblist dblist,
 	dblist->sorted = 1;
 }
 
+static float timeval_subtract(struct timeval *tv1,
+				       struct timeval *tv2)
+{
+	return ((tv1->tv_sec - tv2->tv_sec) +
+		((float) (tv1->tv_usec - tv2->tv_usec)) / 1000000);
+}
 /*
  * This function iterates over the directory block list
  */
