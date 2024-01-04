@@ -974,8 +974,10 @@ static errcode_t PRS(int argc, char *argv[], e2fsck_t *ret_ctx)
 	ctx->readahead_kb = ~0ULL;
 	ctx->inode_badness_threshold = BADNESS_THRESHOLD;
 
+    ctx->use_rbtree = false;
+    ctx->use_fullmap = false;
 #ifdef HAVE_PTHREAD
-	while ((c = getopt(argc, argv, "pam:w:T:nyrcC:B:dE:fvtuFVM:b:I:j:P:l:L:N:SsDkz:")) != EOF)
+	while ((c = getopt(argc, argv, "pam:w:T:nyrcC:B:dE:fvtuRFVM:b:I:j:P:l:L:N:SsDkz:")) != EOF)
 #else
 	while ((c = getopt(argc, argv, "panyrcC:B:dE:fvtFVM:b:I:j:P:l:L:N:SsDkz:")) != EOF)
 #endif
@@ -1066,6 +1068,8 @@ static errcode_t PRS(int argc, char *argv[], e2fsck_t *ret_ctx)
 			break;
         case 'u':
             ctx->use_fullmap = true;
+        case 'R':
+            ctx->use_rbtree = true;
 #endif
 		case 'n':
 			if (ctx->options & (E2F_OPT_YES|E2F_OPT_PREEN))

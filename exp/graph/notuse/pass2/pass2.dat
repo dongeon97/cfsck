@@ -1,0 +1,6 @@
+# of threads	check_consistency	read_dir_block	icount_update	lock_wait
+fsck	1.76	8.30	1.12	0.00
+2	0.79	5.31	0.06	0.09
+4	0.54	4.45	0.03	0.04
+8	0.25	4.26	0.02	0.05
+16	0.13	3.50	0.01	0.03

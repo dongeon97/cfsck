@@ -600,6 +600,8 @@ struct e2fsck_struct {
 //	struct dx_dir_info	*pipeline_dx_dir_info;
 
     bool use_fullmap;
+    bool calculated_use_fullmap;
+    bool use_rbtree;
 
     float icount_time; //for updating icount increment time
     float check_time; // for checking consistency time

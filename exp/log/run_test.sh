@@ -4,7 +4,7 @@
 #FSCKPATH="/home/oslab/mnt/dongeon/FSCK/e2fsprogs/build/e2fsck/e2fsck"
 #pFSCKPATH="/home/oslab/mnt/dongeon/FSCK/pFSCK/e2fsprogs-v1.44.4/build/e2fsck/e2fsck"
 
-RESULTPATH="/home/dongeon/Research/FSCK/log/paper2_exp"
+RESULTPATH="/home/dongeon/Research/FSCK/log/additional_paper_exp"
 
 FSCKPATH="/home/dongeon/Research/FSCK/e2fsprogs/build/e2fsck/e2fsck"
 pFSCKPATH="/home/dongeon/Research/FSCK/pFSCK/e2fsprogs-v1.44.4/build/e2fsck/e2fsck"
@@ -50,38 +50,42 @@ for var in $imagelist; do
     IMGNAME=$(eval echo \$$var)
 
 #for iter in {1..10}; do
-    for iter in {1..5}; do
+#    for iter in {1..5}; do
+#
+#        echo "fsck for $var starts with thread 0 / $iter" 
+#        sudo $FSCKPATH $RUN_OPT $IMGNAME | tee -a  $RESULTPATH/sfsck_0_0_$var.log
+#        FlushDisk
+#
+#    done
 
-        echo "fsck for $var starts with thread 0 / $iter" 
-        sudo $FSCKPATH $RUN_OPT $IMGNAME | tee -a  $RESULTPATH/sfsck_0_0_$var.log
-        FlushDisk
+#for data in 1 2 4 8 16; do
+#    for data in 1 ; do
+##for iter in {1..10}; do
+#        for iter in {1..5}; do
+#
+#            echo "new fsck for $var starts with pipe thread $data / $iter" 
+#            sudo $FSCKPATH $RUN_OPT $FSCK_DATA $data $IMGNAME | tee -a  $RESULTPATH/sfsck_${data}_0_$var.log
+#            FlushDisk
+#
+#        done
+#    done
+#
+##for pipe in 1 2 4 8 16; do
+#    for pipe in 1 ; do
+##for iter in {1..10}; do
+#        for iter in {1..5}; do
+#
+#            echo "new fsck for $var starts with pipe thread $pipe / $iter" 
+#            sudo $FSCKPATH $RUN_OPT $FSCK_PIPE $pipe $IMGNAME | tee -a  $RESULTPATH/sfsck_0_${pipe}_$var.log
+#            FlushDisk
+#
+#        done
+#    done
 
-    done
-
-    for data in 1 2 4 8 16; do
-#for iter in {1..10}; do
-        for iter in {1..5}; do
-
-            echo "new fsck for $var starts with pipe thread $data / $iter" 
-            sudo $FSCKPATH $RUN_OPT $FSCK_DATA $data $IMGNAME | tee -a  $RESULTPATH/sfsck_${data}_0_$var.log
-            FlushDisk
-
-        done
-    done
-
-    for pipe in 1 2 4 8 16; do
-#for iter in {1..10}; do
-        for iter in {1..5}; do
-
-            echo "new fsck for $var starts with pipe thread $pipe / $iter" 
-            sudo $FSCKPATH $RUN_OPT $FSCK_PIPE $pipe $IMGNAME | tee -a  $RESULTPATH/sfsck_0_${pipe}_$var.log
-            FlushDisk
-
-        done
-    done
-
-    for data in 1 2 4 8 16; do
-        for pipe in 1 2 4 8 16; do
+# for data in 1 2 4 8 16; do
+#        for pipe in 1 2 4 8 16; do
+    for data in 1 ; do
+        for pipe in 1 ; do
 #for iter in {1..10}; do
             for iter in {1..5}; do
 
@@ -93,28 +97,6 @@ for var in $imagelist; do
         done
     done
 done
-#
-#sed -i '4154,4154s/EXT2/\/\/EXT2/g' $FSCKSOURCE
-#sed -i '4155,4155s/\/\/EXT2/EXT2/g' $FSCKSOURCE
-#
-#cd $FSCKBUILD
-#make
-#cd -
-#
-##use INCREMENT
-#for var in $imagelist; do
-#    IMGNAME=$(eval echo \$$var)
-#
-#    for pipe in 1 2 4 8 16; do
-#        for iter in {1..10}; do
-#
-#            echo "NOFULLMAP fsck for $var starts with pipe thread $pipe / $iter" 
-#            sudo $FSCKPATH $RUN_OPT $FSCK_PIPE $pipe $IMGNAME | tee -a  $RESULTPATH/nofullmap_fsck_0_${pipe}_$var.log
-#            FlushDisk
-#
-#        done
-#    done
-#done
 
 #run pFSCK
 
@@ -127,9 +109,9 @@ echo $pFSCK_DATA
 echo $pFSCK_PIPE
 
 #use FULLMAP
-#for var in $imagelist; do
-#    IMGNAME=$(eval echo \$$var)
-#
+for var in $imagelist; do
+    IMGNAME=$(eval echo \$$var)
+
 #    for iter in {1..10}; do
 #
 #        echo "pfsck for $var starts with thread 0 / $iter" 
@@ -138,7 +120,8 @@ echo $pFSCK_PIPE
 #        FlushDisk
 #
 #    done
-#    for data in 2 4 8 16; do
+# for data in 2 4 8 16; do
+#    for data in 1; do
 #        for iter in {1..10}; do
 #
 #            echo "pfsck for $var starts with data thread $pipe / $iter" 
@@ -148,7 +131,8 @@ echo $pFSCK_PIPE
 #        done
 #    done
 #
-#    for pipe in 2 4 8 16; do
+##for pipe in 2 4 8 16; do
+#    for pipe in 1; do
 #        for iter in {1..10}; do
 #
 #            echo "pfsck for $var starts with pipe thread $pipe / $iter" 
@@ -157,40 +141,18 @@ echo $pFSCK_PIPE
 #
 #        done
 #    done
-#
-#    for data in 2 4 8 16; do
-#        for pipe in 2 4 8 16; do
-#            for iter in {1..10}; do
-#
-#                echo "pfsck for $var starts with data $data, pipe thread $pipe / $iter" 
-#                sudo $pFSCKPATH $pFSCK_RUN_OPT $pFSCK_DATA $data $pFSCK_PIPE $pipe $IMGNAME | tee -a  $RESULTPATH/pfsck_${data}_${pipe}_$var.log
-#                FlushDisk
-#
-#            done
-#        done
-#    done
-#
-#done
 
-#sed -i '120,120s/if/\/\/if/g' $pFSCKSOURCE
-#sed -i '121,121s/\/\/if/if/g' $pFSCKSOURCE
-#
-#cd $pFSCKBUILD
-#make USER_CFLAGS='-D_PIPELINE_PARALLELISM -D_SCHEDULER'
-#cd -
-#
-##use INCREMENT
-#for var in $imagelist; do
-#    IMGNAME=$(eval echo \$$var)
-#
-#    for pipe in 2 4 8 16; do
-#        for iter in {1..1}; do
-#
-#            echo "NO FULLMAP pfsck for $var starts with pipe thread $pipe / $iter" 
-#            sudo $pFSCKPATH $pFSCK_RUN_OPT $pFSCK_DATA 1 $pFSCK_PIPE $pipe $IMGNAME | tee -a  $RESULTPATH/nofullmap_pfsck_0_${pipe}_$var.log
-#            FlushDisk
-#
-#        done
-#    done
-#
-#done
+    for data in 1; do
+        for pipe in 1; do
+            for iter in {1..10}; do
+
+                echo "pfsck for $var starts with data $data, pipe thread $pipe / $iter" 
+                sudo $pFSCKPATH $pFSCK_RUN_OPT $pFSCK_DATA $data $pFSCK_PIPE $pipe $IMGNAME | tee -a  $RESULTPATH/pfsck_${data}_${pipe}_$var.log
+                FlushDisk
+
+            done
+        done
+    done
+
+done
+

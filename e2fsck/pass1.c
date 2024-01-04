@@ -2051,7 +2051,7 @@ void e2fsck_pass1_run(e2fsck_t ctx)
     unsigned long long pipeline_count = 0;
     struct timeval start,end;
     float read_time = 0.0 ;
-    int flag;
+    int flag, icount_flag,dir_flag;
 
 
 	init_resource_track(&rtrack, ctx->fs->io);
@@ -2078,8 +2078,10 @@ void e2fsck_pass1_run(e2fsck_t ctx)
 	 */
    // display_mallinfo();
 
-    //flag = ctx->use_fullmap ? EXT2FS_BMAP64_BITARRAY : EXT2FS_BMAP64_RBTREE;
-    flag = EXT2FS_BMAP64_RBTREE;
+    //printf("thread ctx => use_fullmap ? : %d\n",ctx->use_fullmap);
+    flag = ctx->use_fullmap ? EXT2FS_BMAP64_BITARRAY : EXT2FS_BMAP64_RBTREE;
+    dir_flag = ctx->use_fullmap ? EXT2FS_BMAP64_BITARRAY : EXT2FS_BMAP64_AUTODIR;
+    //flag = EXT2FS_BMAP64_RBTREE;
 
 	pctx.errcode = e2fsck_allocate_inode_bitmap(fs, _("in-use inode map"),
                             flag, "inode_used_map",
@@ -2094,7 +2096,7 @@ void e2fsck_pass1_run(e2fsck_t ctx)
 			_("directory inode map"),
 	//		ctx->global_ctx ? EXT2FS_BMAP64_RBTREE :
 	//		EXT2FS_BMAP64_AUTODIR,
-            flag,
+            dir_flag,
 			"inode_dir_map", &ctx->inode_dir_map);
 	if (pctx.errcode) {
 		pctx.num = 2;
@@ -2127,8 +2129,9 @@ void e2fsck_pass1_run(e2fsck_t ctx)
 		}
 	}
                //TODO, forpipe -> 0 
-	pctx.errcode = e2fsck_setup_icount(ctx, "inode_link_info", EXT2_ICOUNT_OPT_FORPIPE, NULL,
-	//pctx.errcode = e2fsck_setup_icount(ctx, "inode_link_info", 0, NULL,
+    icount_flag = ctx->calculated_use_fullmap ? EXT2_ICOUNT_OPT_FORPIPE : 0;
+	//pctx.errcode = e2fsck_setup_icount(ctx, "inode_link_info", EXT2_ICOUNT_OPT_FORPIPE, NULL,
+	pctx.errcode = e2fsck_setup_icount(ctx, "inode_link_info", icount_flag, NULL,
 					   &ctx->inode_link_info);
 	if (pctx.errcode) {
 		fix_problem(ctx, PR_1_ALLOCATE_ICOUNT, &pctx);
@@ -4224,7 +4227,7 @@ static int e2fsck_pipeline_threadpool_start(e2fsck_t global_ctx)
 
     ext2fs_init_dclist(global_ctx->fs, &global_ctx->fs->dclist);
 
-    if(global_ctx->use_fullmap){
+    if(global_ctx->calculated_use_fullmap){
         flag = EXT2_ICOUNT_OPT_FORPIPE;
     }else{
         flag = EXT2_ICOUNT_OPT_RBTREE2;
@@ -4429,11 +4432,16 @@ void e2fsck_pass1(e2fsck_t ctx)
     ext2fs_get_ratio_used(ctx->fs, &ratio_used);
     printf("[Exp] dir ratio : %d, used ratio : %d\n", ratio_dirs,ratio_used);
 
-    //if(ctx->pfs_num_pipeline_threads && !ctx->use_fullmap)
-    if(!ctx->use_fullmap)
+    if(ctx->use_fullmap){
+        ctx->calculated_use_fullmap = ctx->use_fullmap;
+    }else if(ctx->use_rbtree){
+        ctx->use_fullmap = false;
+        ctx->calculated_use_fullmap =  ratio_used < 50 && ratio_dirs * ratio_used <= 200 ? false : true;
+    }else {
+    //if(!ctx->use_fullmap && !ctx->use_rbtree){
         ctx->use_fullmap =  ratio_used < 50 && ratio_dirs * ratio_used <= 200 ? false : true;
-    //else ctx->use_fullmap = true;
-    //ctx->use_fullmap = false;
+        ctx->calculated_use_fullmap = ctx->use_fullmap;
+    }
 
     printf("[Exp] use_fullmap ? : %d\n", ctx->use_fullmap);
 

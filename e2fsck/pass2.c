@@ -272,7 +272,7 @@ static int e2fsck_pipeline_thread_join(e2fsck_t global_ctx, struct e2fsck_pipeli
     if(started){
         //merge icount
 
-        if(!global_ctx->use_fullmap){
+        if(!global_ctx->calculated_use_fullmap){
             gettimeofday(&start,0);
             retval = e2fsck_pipeline_merge_icount(&global_ctx->inode_count,
                                              &pipeline_ctx->inode_count); 
@@ -296,7 +296,7 @@ static int e2fsck_pipeline_thread_join(e2fsck_t global_ctx, struct e2fsck_pipeli
 		pipeline_ctx->fs->icache = NULL;
     }
     
-    if(!global_ctx->use_fullmap){
+    if(!global_ctx->calculated_use_fullmap){
 	    ext2fs_free_icount(pipeline_ctx->inode_count);
     }
     ext2fs_free_mem(&pipeline_ctx->fs);
@@ -499,8 +499,9 @@ void e2fsck_pass2(e2fsck_t ctx)
 		fix_problem(ctx, PR_2_PASS_HEADER, &cd.pctx);
 
     if(!ctx->pfs_num_pipeline_threads){
-        ctx->use_fullmap = true;
-        int flag = ctx->use_fullmap ? EXT2_ICOUNT_OPT_FORPIPE : EXT2_ICOUNT_OPT_INCREMENT;
+        //ctx->use_fullmap = true;
+        //int flag = ctx->use_fullmap ? EXT2_ICOUNT_OPT_FORPIPE : EXT2_ICOUNT_OPT_INCREMENT;
+        int flag = ctx->calculated_use_fullmap ? EXT2_ICOUNT_OPT_FORPIPE : EXT2_ICOUNT_OPT_RBTREE2;
         cd.pctx.errcode = e2fsck_setup_icount(ctx, "inode_count",
                     flag, ctx->inode_link_info, &ctx->inode_count);
         if (cd.pctx.errcode) {
@@ -2358,7 +2359,7 @@ skip_checksum:
             gettimeofday(&end,0);
             ctx->icount_time += timeval_subtract(&end,&start);
         }else{
-            if(global_ctx->use_fullmap){
+            if(global_ctx->calculated_use_fullmap){
                 gettimeofday(&gstart,0);
 
                 pthread_mutex_lock(&ctx->inode_count->icount_lock);
