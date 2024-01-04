@@ -2246,11 +2246,11 @@ void e2fsck_pass1_run(e2fsck_t ctx)
 		}
 
 		/* only one active thread could update mmp block. */
-		e2fsck_pass1_block_map_r_lock(ctx);
+		//e2fsck_pass1_block_map_r_lock(ctx);
 		if (global_ctx->mmp_update_thread ==
 		    ctx->thread_info.et_thread_index + 1)
 			check_mmp = 1;
-		e2fsck_pass1_block_map_r_unlock(ctx);
+		//e2fsck_pass1_block_map_r_unlock(ctx);
 #else
 		check_mmp = 1;
 #endif
